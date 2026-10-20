@@ -44,3 +44,36 @@ def test_unmatched_tool_calls_finds_calls_without_results() -> None:
     log.append("t1", EventType.TOOL_CALL, {}, correlation_id="b")  # crashed before its result
     log.append("t2", EventType.TOOL_CALL, {}, correlation_id="c")  # different task
     assert [e.correlation_id for e in log.unmatched_tool_calls("t1")] == ["b"]
+
+
+def test_checkpoints_are_saved_replaced_and_loaded() -> None:
+    log = EventLog()
+    assert log.load_checkpoint("t1") is None
+    log.save_checkpoint("t1", {"state": "created"})
+    log.save_checkpoint("t1", {"state": "running"})  # replaces: checkpoints are mutable
+    log.save_checkpoint("t2", {"state": "other"})
+    assert log.load_checkpoint("t1") == {"state": "running"}
+    assert log.load_checkpoint("t2") == {"state": "other"}
+
+
+def test_usage_is_recomputed_from_events_alone() -> None:
+    log = EventLog()
+    log.append(
+        "t1",
+        EventType.MODEL_CALL,
+        {"attempts": 1, "input_tokens": 60, "output_tokens": 40, "dollars": "0.10"},
+    )
+    log.append(
+        "t1",
+        EventType.MODEL_CALL,
+        {"attempts": 3, "input_tokens": 0, "output_tokens": 0, "dollars": "0"},  # failed retries
+    )
+    log.append("t1", EventType.TOOL_CALL, {}, correlation_id="a")
+    log.append("t1", EventType.TOOL_RESULT, {}, correlation_id="a")
+    log.append("t1", EventType.MODEL_CALL, {"attempts": 1})  # missing fields default to zero
+    log.append("t2", EventType.MODEL_CALL, {"attempts": 9, "input_tokens": 999})  # other task
+    usage = log.recompute_usage("t1")
+    assert usage.model_calls == 5
+    assert usage.tool_calls == 1
+    assert usage.tokens_total == 100
+    assert str(usage.dollars) == "0.10"

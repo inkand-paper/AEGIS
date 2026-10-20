@@ -51,6 +51,7 @@ class Task(BaseModel):
     plan_id: str | None = None
     last_error: str | None = None
     verification_result_id: str | None = None  # added: §5.1 invariant needs it
+    acceptance: list[str] = Field(default_factory=list)  # added: criteria from --accept
 
 
 class ToolCall(BaseModel):
@@ -72,6 +73,7 @@ class EventType(StrEnum):
     PLAN_REVISED = "plan_revised"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    MODEL_CALL = "model_call"  # added: usage must be recomputable from events (8.2)
     EVIDENCE_ADDED = "evidence_added"
     VERIFICATION = "verification"
     APPROVAL_REQUESTED = "approval_requested"
@@ -125,4 +127,70 @@ class Observation(BaseModel):
     tool_call_id: str
     summary: str  # short, for model context
     detail_ref: str | None = None  # pointer to the full record (the TOOL_RESULT event id)
-    artifact_ids: list[str] = Field(default_factory=list)  
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class StepStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class Step(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    plan_id: str
+    index: int  # ordering within the plan
+    description: str  # human-readable
+    depends_on: list[str] = Field(default_factory=list)  # step ids
+    status: StepStatus = StepStatus.PENDING
+    evidence_ids: list[str] = Field(default_factory=list)  # verifier evidence records
+    attempts: int = 0
+
+
+class Plan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_id: str
+    steps: list[Step]
+    current_step_id: str | None = None
+    revision: int = 1  # bumped on replan
+    superseded_by: str | None = None
+
+
+class EvidenceKind(StrEnum):
+    TEST_PASS = "test_pass"
+    FILE_EXISTS = "file_exists"
+    FILE_DIFF = "file_diff"
+    ARTIFACT_HASH = "artifact_hash"
+    BROWSER_STATE = "browser_state"
+    HUMAN_APPROVAL = "human_approval"
+    COMMAND_EXIT_ZERO = "command_exit_zero"
+    TOOL_RESULT = "tool_result"  # added: a tool really returned this (Phase 2 evidence)
+
+
+class Evidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_id: str
+    step_id: str | None = None
+    kind: EvidenceKind
+    payload: dict[str, Any]  # kind-specific
+    created_at: datetime
+    source_tool_call_id: str
+
+
+class VerificationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_id: str
+    passed: bool
+    checks: list[dict[str, Any]]  # {name, passed, evidence_ids, message}
+    created_at: datetime
+    verifier_version: str

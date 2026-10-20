@@ -1,16 +1,19 @@
-"""Append-only event log in SQLite (design doc sections 4.3, 5.5 and 8).
+"""Append-only event log plus a checkpoint table, in SQLite (design doc sections 4.3, 5.5, 8).
 
-The log is the source of truth for "what actually happened". SQLite triggers make UPDATE and
-DELETE on it fail, so even a bug in our own code cannot rewrite history.
+The event log is the source of truth for "what actually happened". SQLite triggers make UPDATE
+and DELETE on it fail, so even a bug in our own code cannot rewrite history. The checkpoint table
+is the opposite: one mutable row per task saying "where we think we are". Keeping both lets
+recovery compare reality (events) with belief (checkpoint).
 """
 
 import json
 import sqlite3
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from aegis.models import Event, EventType
+from aegis.models import BudgetUsage, Event, EventType
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -26,6 +29,11 @@ CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+CREATE TABLE IF NOT EXISTS checkpoints (
+    task_id    TEXT PRIMARY KEY,
+    snapshot   TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -50,6 +58,8 @@ class EventLog:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ------------------------------------------------------------------ events (append-only)
 
     def append(
         self,
@@ -96,3 +106,41 @@ class EventLog:
             (task_id, EventType.TOOL_CALL.value, EventType.TOOL_RESULT.value),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def recompute_usage(self, task_id: str) -> BudgetUsage:
+        """Rebuild usage from events alone. Compare with the checkpoint to detect drift.
+
+        Wall-clock time cannot be rebuilt from events (idle time is not work), so it stays 0.
+        """
+        model_calls = 0
+        tokens = 0
+        dollars = Decimal("0")
+        for event in self.events(task_id, EventType.MODEL_CALL):
+            payload = event.payload
+            model_calls += int(payload.get("attempts", 1))
+            tokens += int(payload.get("input_tokens", 0)) + int(payload.get("output_tokens", 0))
+            dollars += Decimal(str(payload.get("dollars", "0")))
+        tool_calls = len(self.events(task_id, EventType.TOOL_CALL))
+        return BudgetUsage(
+            model_calls=model_calls, tool_calls=tool_calls, tokens_total=tokens, dollars=dollars
+        )
+
+    # ------------------------------------------------------------------ checkpoints (mutable)
+
+    def save_checkpoint(self, task_id: str, snapshot: dict[str, Any]) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO checkpoints (task_id, snapshot, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET "
+                "snapshot = excluded.snapshot, updated_at = excluded.updated_at",
+                (task_id, json.dumps(snapshot, default=str), datetime.now(UTC).isoformat()),
+            )
+
+    def load_checkpoint(self, task_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT snapshot FROM checkpoints WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        snapshot: dict[str, Any] = json.loads(row["snapshot"])
+        return snapshot
