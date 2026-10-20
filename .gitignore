@@ -1,3 +1,12 @@
 .env
 data/
 workspaces/
+
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
