@@ -63,3 +63,66 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
     requested_at: datetime
     idempotency_key: str | None = None
+
+
+class EventType(StrEnum):
+    TASK_CREATED = "task_created"
+    STATE_CHANGED = "state_changed"
+    PLAN_CREATED = "plan_created"
+    PLAN_REVISED = "plan_revised"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    EVIDENCE_ADDED = "evidence_added"
+    VERIFICATION = "verification"
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVAL_GRANTED = "approval_granted"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    ERROR = "error"
+
+
+class Event(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int  # autoincrement
+    task_id: str
+    type: EventType
+    payload: dict[str, Any]
+    created_at: datetime
+    correlation_id: str | None = None  # ties related events (e.g. call -> result)
+
+
+class ToolOutcome(StrEnum):
+    """How one tool call ended. Anything other than OK is recorded as a failure."""
+
+    OK = "ok"
+    TOOL_NOT_FOUND = "tool_not_found"
+    INVALID_ARGUMENTS = "invalid_arguments"
+    POLICY_VIOLATION = "policy_violation"
+    APPROVAL_REQUIRED = "approval_required"
+    TOOL_ERROR = "tool_error"  # the tool ran and reported an expected failure
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    INTERNAL_ERROR = "internal_error"  # a bug in the tool, never the model's fault
+
+
+class ToolCallRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call: ToolCall
+    started_at: datetime
+    finished_at: datetime
+    outcome: ToolOutcome  # added: lets the controller count policy violations (section 13.2)
+    success: bool
+    result_model: str | None = None  # name of the result Pydantic model
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    truncated: bool = False
+
+
+class Observation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str
+    summary: str  # short, for model context
+    detail_ref: str | None = None  # pointer to the full record (the TOOL_RESULT event id)
+    artifact_ids: list[str] = Field(default_factory=list)  
