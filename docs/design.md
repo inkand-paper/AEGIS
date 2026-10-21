@@ -634,6 +634,11 @@ This section exists so the changes are explicit and reviewable.
 5. **Replanning has explicit triggers and a budget.** Reason: "failure-driven replanning" was a differentiator but had no bound, which is how agents loop forever.
 6. **Budget is a first-class field on `Task` and enforced by the controller.** Reason: "limit model expenditure" was a footnote; cost-per-success is a headline metric.
 7. **Model provider decision is an explicit blocker for Phase 1.** Reason: the note said "start with one provider" but didn't make the choice a gate, and the choice affects structured-output and tool-call code.
+8. **(Phase 4) Persistence is stdlib `sqlite3` with numbered migrations (`PRAGMA user_version`), not SQLAlchemy + Alembic, and the schema is `events` + `checkpoints` + `leases`, not the ten tables of §8.1.** Reason: one writer, and every other table in §8.1 can be derived from the event log plus the checkpoint, so the ORM and the extra tables would add two dependencies and a second source of truth without enabling anything yet. Revisit when the Phase 9 benchmark harness needs relational queries over many tasks. The recovery contract of §8.2 is implemented as written.
+9. **(Phase 3) Side-effect class `execute` was added** between `workspace` and `external`. Reason: running the project's tests runs code the model wrote, which is more dangerous than writing a file, so declaring `workspace` never pre-approves it.
+10. **(Phase 3) Approval continues a paused task by saving the paused step's conversation** (`PendingApproval`), because `aegis approve` runs in a separate process. Crash recovery (Phase 4) rebuilds the interrupted step from events instead.
+11. **(Phase 4) One worker per task** is enforced with a lease and heartbeat, so two processes never drive the same task. Not in the original design; required for `resume` to be safe.
+12. **(Phase 4) Idempotency keys** suppress an exact repeat of the most recent change when nothing else has changed since, returning the recorded result instead of running it again.
 
 ---
 
@@ -762,6 +767,7 @@ Anything beyond that is v0.2+.
 | Version | Date | Change |
 |---------|------|--------|
 | 0.1 | — | Initial design doc. Supersedes the original planning note. Incorporates the review points: Phase 2 persistence, mandatory result models, deterministic verifier, explicit threat model, bounded replanning, first-class budgets, provider decision as a blocker. |
+| 0.2 | 2026-10 | Implementation notes for Phases 2 to 4: deviations 8 to 12 in section 14. No change to the contracts in sections 5 to 9. |
 
 ---
 

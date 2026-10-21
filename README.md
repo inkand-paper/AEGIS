@@ -13,6 +13,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 1 | Provider-agnostic model client, retry, redaction | done |
 | 2 | Tools, dispatcher, event log, agent loop, verifier | done |
 | 3 | Write and edit tools, allowlisted shell, approval flow | done |
+| 4 | Durable state, crash recovery (`resume`), event-log replay | done |
 
 ## Setup
 
@@ -86,6 +87,31 @@ Exit codes: `0` completed, `1` failed, `2` waiting for approval, `3` cancelled, 
 
 Each task works inside its own folder, `workspaces/<task_id>/`. State is kept in `data/aegis.db`.
 Both are gitignored.
+
+### If the process dies: resume, report, replay
+
+Every step is written to the append-only event log before it happens (`data/aegis.db`). If a task
+is cut off (power cut, killed terminal, crash), carry it on with:
+
+```bash
+uv run aegis resume <task_id>
+uv run aegis report <task_id> --replay   # final report, files with hashes, and a log consistency check
+```
+
+`resume` does not start over. It rebuilds where the task was from the log and carries on from the
+interrupted step. A tool call that was cut off is closed on the record as interrupted. A safe-to-repeat
+call (a read, a test run) runs again. A call that may have half-run, such as a file write, is NEVER
+repeated on its own: the task waits for your `aegis approve`, so a side effect is never duplicated
+silently. Usage (calls, tokens, dollars) is recomputed from the log, and any difference from what was
+stored is reported and corrected.
+
+Only one process may work on a task at a time. A task whose worker was killed becomes resumable once
+its lease runs out, about 30 seconds after the last heartbeat. Before that, `resume` tells you who
+holds it. The database is upgraded automatically when you update AEGIS (a copy is kept next to it
+first), and a database written by a newer AEGIS is refused rather than damaged.
+
+`report --replay` replays the log and exits 1 if anything breaks the rules (an illegal state change,
+a call without a result, evidence from a failed call, COMPLETED without a passing verification).
 
 ## Development
 
