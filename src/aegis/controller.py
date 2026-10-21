@@ -7,17 +7,19 @@ done. Only the verifier can then move the task to COMPLETED (P3).
 """
 
 import asyncio
+import contextlib
 import logging
+import os
 import shutil
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from aegis.executor import Executor
+from aegis.executor import Executor, observation_text
 from aegis.log import redact
 from aegis.memory import EventLog
 from aegis.model_client import (
@@ -62,6 +64,7 @@ You work on ONE step of a plan at a time. For the current step:
   further tool call."""
 
 MAX_STEP_RESULT_CHARS = 500
+MAX_STORED_RESULT_CHARS = 4000  # a step's result text is kept in its event so a resume can use it
 # Effects a task may declare up front. "external" can never be pre-approved.
 DECLARABLE_EFFECTS = frozenset({"workspace", "execute"})
 
@@ -94,6 +97,10 @@ class _ApprovalNeeded(Exception):
         self.arguments = arguments
         self.reason = reason
         self.pending: PendingApproval | None = None  # filled in by the step loop
+
+
+class LeaseLost(Exception):
+    """Another process took over this task while we were working on it, so we must stop."""
 
 
 class _Cancelled(Exception):
@@ -194,6 +201,7 @@ class _Run:
     final_answer: str | None = None
     verification: VerificationResult | None = None
     pending: PendingApproval | None = None
+    recovery: dict[str, Any] | None = None  # what the last resume found and did
     started: float = field(default_factory=time.monotonic)
     base_wall_s: float = 0.0
 
@@ -212,6 +220,7 @@ class Controller:
         max_output_tokens: int = 4000,
         max_turns_per_step: int = 8,
         max_step_attempts: int = 2,
+        lease_ttl_s: float = 30.0,
     ) -> None:
         self._model = model
         self._registry = registry
@@ -227,6 +236,9 @@ class Controller:
         self._verifier = Verifier()
         self._runs: dict[str, _Run] = {}
         self._cancel_requested: set[str] = set()
+        self._lease_ttl_s = lease_ttl_s
+        self._owner = f"pid{os.getpid()}-{uuid.uuid4().hex[:6]}"
+        self._lost_leases: set[str] = set()
 
     # ------------------------------------------------------------------ public API
 
@@ -298,42 +310,88 @@ class Controller:
 
     async def run(self, task_id: str) -> Task:
         """Run a CREATED task until it reaches a terminal state, and return it."""
-        run = self._load_run(task_id)
-        task = run.task
-        if task.state in TERMINAL:
-            return task
-        if task.state is not TaskState.CREATED:
-            hint = (
-                "use approve"
-                if task.state is TaskState.WAITING_FOR_APPROVAL
-                else "resuming a started task arrives in Phase 4"
-            )
-            raise InvalidTransition(f"task is {task.state.value}; {hint}")
-        run.started = time.monotonic()
-        return await self._drive(run, resume=False)
+        async with self._leased(task_id):
+            run = self._load_run(task_id)
+            task = run.task
+            if task.state in TERMINAL:
+                return task
+            if task.state is not TaskState.CREATED:
+                hint = {
+                    TaskState.WAITING_FOR_APPROVAL: "use approve",
+                }.get(task.state, "use resume")
+                raise InvalidTransition(f"task is {task.state.value}; {hint}")
+            return await self._drive(run)
 
     async def approve(self, task_id: str) -> Task:
         """Grant the pending approval and carry the task on to its next stopping point."""
-        run = self._load_run(task_id)
-        pending = run.pending
-        if run.task.state is not TaskState.WAITING_FOR_APPROVAL or pending is None:
-            raise InvalidTransition(f"task is {run.task.state.value}; no approval is pending")
-        self._events.append(
-            task_id,
-            EventType.APPROVAL_GRANTED,
-            {"tool_call_id": pending.tool_call_id, "tool_name": pending.tool_name, "by": "human"},
-            correlation_id=pending.tool_call_id,
-        )
-        run.base_wall_s = run.task.usage.wall_clock_s  # time spent waiting is not work
-        run.started = time.monotonic()
-        self._transition(run, TaskState.RUNNING, reason="approval granted")
-        return await self._drive(run, resume=True)
+        async with self._leased(task_id):
+            run = self._load_run(task_id)
+            pending = run.pending
+            if run.task.state is not TaskState.WAITING_FOR_APPROVAL or pending is None:
+                raise InvalidTransition(f"task is {run.task.state.value}; no approval is pending")
+            self._events.append(
+                task_id,
+                EventType.APPROVAL_GRANTED,
+                {
+                    "tool_call_id": pending.tool_call_id,
+                    "tool_name": pending.tool_name,
+                    "by": "human",
+                },
+                correlation_id=pending.tool_call_id,
+            )
+            self._transition(run, TaskState.RUNNING, reason="approval granted")
+            return await self._drive(run)
 
-    async def _drive(self, run: _Run, *, resume: bool) -> Task:
+    async def resume(self, task_id: str) -> Task:
+        """Carry on a task whose process died (design doc 8.2).
+
+        Rebuilds what happened from the event log, closes calls that never finished, re-runs the
+        ones that are safe to repeat, and stops for a human on any that may have half-run.
+        """
+        async with self._leased(task_id):
+            run = self._load_run(task_id)
+            state = run.task.state
+            if state in TERMINAL:
+                raise InvalidTransition(f"task is already {state.value}; nothing to resume")
+            if state is TaskState.WAITING_FOR_APPROVAL:
+                raise InvalidTransition("task is waiting for a decision: use approve or cancel")
+            if state is TaskState.CREATED:
+                return await self._drive(run)
+            return await self._drive(run, recover=True)
+
+    @contextlib.asynccontextmanager
+    async def _leased(self, task_id: str) -> AsyncIterator[None]:
+        """Hold the task's lease while working on it, so two processes never drive one task."""
+        self._events.acquire_lease(task_id, self._owner, self._lease_ttl_s)  # may raise LeaseHeld
+        self._lost_leases.discard(task_id)
+        heartbeat = asyncio.create_task(self._heartbeat(task_id))
+        try:
+            yield
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            self._events.release_lease(task_id, self._owner)
+
+    async def _heartbeat(self, task_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._lease_ttl_s / 3)
+            if not self._events.renew_lease(task_id, self._owner):
+                logger.error("task %s: lease lost, stopping", task_id)
+                self._lost_leases.add(task_id)
+                return
+
+    async def _drive(self, run: _Run, *, recover: bool = False) -> Task:
         task = run.task
         task_id = task.id
+        run.base_wall_s = task.usage.wall_clock_s  # time spent waiting or down is not work
+        run.started = time.monotonic()
         try:
-            await self._execute(run, resume=resume)
+            if recover:
+                self._recover(run)
+            await self._execute(run)
+        except LeaseLost:
+            raise  # not ours any more: write nothing, the new owner decides
         except _ApprovalNeeded as need:
             self._request_approval(run, need)
         except _Cancelled:
@@ -400,12 +458,11 @@ class Controller:
 
     # ------------------------------------------------------------------ the agent loop
 
-    async def _execute(self, run: _Run, *, resume: bool = False) -> None:
+    async def _execute(self, run: _Run) -> None:
         task = run.task
-        if resume:
-            assert run.plan is not None
-        else:
+        if task.state is TaskState.CREATED:
             self._transition(run, TaskState.RUNNING, reason="started")
+        if run.plan is None:  # a fresh task, or one that stopped before its plan was saved
 
             async def ask(
                 messages: list[Message], tools: list[dict[str, Any]], max_tokens: int
@@ -482,7 +539,7 @@ class Controller:
                 logger.warning("step %d attempt %d failed: %s", step.index, step.attempts, feedback)
                 continue
             step.status = StepStatus.DONE
-            self._step_event(run, step, "done")
+            self._step_event(run, step, "done", result=text[:MAX_STORED_RESULT_CHARS])
             return text
         step.status = StepStatus.FAILED
         self._step_event(run, step, "failed", error=feedback)
@@ -506,7 +563,7 @@ class Controller:
             messages = [Message.model_validate(m) for m in resume.messages]
             queued = [RawToolCall.model_validate(c) for c in resume.calls]
             first_turn = resume.turn
-            approve_first = True  # the first queued call is the one a human just approved
+            approve_first = resume.approved  # a human said yes to the first queued call
         for turn in range(first_turn, self._max_turns_per_step):
             if queued:
                 calls, queued = queued, []
@@ -651,6 +708,192 @@ class Controller:
         self._raise_if_over(run)
         return response
 
+    # ------------------------------------------------------------------ recovery (section 8.2)
+
+    def _recover(self, run: _Run) -> None:
+        """Make the in-memory state agree with the event log after a crash."""
+        task = run.task
+        log = self._events
+        report: dict[str, Any] = {"at": datetime.now(UTC).isoformat()}
+
+        # 1. The plan and the step statuses. Events are written before the checkpoint, so after
+        #    a crash the checkpoint can be one step behind. The events are the truth.
+        if run.plan is None:
+            created = log.events(task.id, EventType.PLAN_CREATED)
+            if created:
+                run.plan = Plan.model_validate(created[-1].payload["plan"])
+                task.plan_id = run.plan.id
+        if run.plan is not None:
+            steps = {step.id: step for step in run.plan.steps}
+            for event in log.events(task.id, EventType.STATE_CHANGED):
+                payload = event.payload
+                step = steps.get(payload.get("step_id", "")) if payload["scope"] == "step" else None
+                if step is None:
+                    continue
+                step.status = StepStatus(payload["status"])
+                step.attempts = max(step.attempts, int(payload.get("attempt", 0)))
+                if payload["status"] == "done" and "result" in payload:
+                    run.step_results[step.id] = payload["result"]
+
+        # 2. Usage is recomputed from events, and a mismatch is reported (drift).
+        rebuilt = log.recompute_usage(task.id)
+        drift = {
+            name: {"recorded": str(getattr(task.usage, name)), "from_events": str(value)}
+            for name in ("model_calls", "tool_calls", "tokens_total", "dollars")
+            if getattr(task.usage, name) != (value := getattr(rebuilt, name))
+        }
+        if drift:
+            logger.warning("task %s: usage drift found and corrected: %s", task.id, drift)
+            task.usage = rebuilt.model_copy(update={"wall_clock_s": task.usage.wall_clock_s})
+        report["usage_drift"] = drift
+
+        # 3. Calls with no result may have half-run. Close each one explicitly (P5), then decide.
+        interrupted = log.unmatched_tool_calls(task.id)
+        for event in interrupted:
+            log.append(
+                task.id,
+                EventType.TOOL_RESULT,
+                {
+                    "tool_call_id": event.correlation_id,
+                    "tool_name": event.payload["tool_name"],
+                    "outcome": ToolOutcome.INTERRUPTED.value,
+                    "success": False,
+                    "result_model": None,
+                    "result": None,
+                    "error": "the process stopped before this call finished",
+                    "side_effects": None,
+                    "idempotency_key": None,
+                    "deduplicated": False,
+                    "duration_ms": 0,
+                },
+                correlation_id=event.correlation_id,
+            )
+        report["interrupted_calls"] = [
+            {"tool_call_id": e.correlation_id, "tool_name": e.payload["tool_name"]}
+            for e in interrupted
+        ]
+        if task.state is TaskState.VERIFYING:
+            self._transition(run, TaskState.RUNNING, reason="recovering")
+
+        # 4. Rebuild the conversation of the step that was in progress, and queue the calls
+        #    that were cut off.
+        step = next(
+            (s for s in (run.plan.steps if run.plan else []) if s.status is StepStatus.IN_PROGRESS),
+            None,
+        )
+        pending: PendingApproval | None = None
+        unsafe: PendingApproval | None = None
+        if step is not None:
+            mine = [e for e in interrupted if e.payload.get("step_id") == step.id]
+            unsafe_event = next((e for e in mine if not self._safe_to_repeat(e)), None)
+            skip = {e.correlation_id for e in mine}
+            queued = [
+                RawToolCall(
+                    id=e.correlation_id or "",
+                    name=e.payload["tool_name"],
+                    arguments=e.payload["arguments"],
+                )
+                for e in mine
+            ]
+            base = PendingApproval(
+                step_id=step.id,
+                tool_call_id=(mine[0].correlation_id or "") if mine else "",
+                tool_name=mine[0].payload["tool_name"] if mine else "",
+                arguments=mine[0].payload["arguments"] if mine else {},
+                reason="",
+                turn=0,
+                messages=[
+                    m.model_dump(mode="json")
+                    for m in self._rebuild_step_messages(run, step, skip, queued)
+                ],
+                calls=[c.model_dump(mode="json") for c in queued],
+                approved=False,
+                requested_at=datetime.now(UTC),
+            )
+            if unsafe_event is not None:
+                unsafe = base.model_copy(
+                    update={
+                        "approved": True,  # a human saying yes means: run it again
+                        "tool_call_id": unsafe_event.correlation_id or "",
+                        "tool_name": unsafe_event.payload["tool_name"],
+                        "arguments": unsafe_event.payload["arguments"],
+                        "reason": (
+                            f"{unsafe_event.payload['tool_name']} was interrupted before a result "
+                            "was recorded, so it may have partly run. Check the workspace, then "
+                            "approve to run it again, or cancel."
+                        ),
+                    }
+                )
+            else:
+                pending = base
+        report["resumed_step"] = step.index if step is not None else None
+        report["needs_human"] = unsafe is not None
+        run.recovery = report
+        log.append(task.id, EventType.TASK_RESUMED, report)
+        self._checkpoint(run)
+
+        if unsafe is not None:
+            need = _ApprovalNeeded(
+                unsafe.tool_call_id, unsafe.tool_name, unsafe.arguments, unsafe.reason
+            )
+            need.pending = unsafe
+            raise need
+        run.pending = pending
+
+    def _safe_to_repeat(self, event: Any) -> bool:
+        """May an interrupted call simply be run again? Only if running it twice is harmless."""
+        try:
+            tool = self._registry.get(event.payload["tool_name"])
+        except KeyError:
+            return True  # an unknown tool never ran
+        try:
+            args = tool.arg_model.model_validate(event.payload["arguments"])
+        except ValueError:
+            return True  # rejected before it could do anything
+        return bool(tool.idempotent or tool.effective_side_effects(args) == "none")
+
+    def _rebuild_step_messages(
+        self, run: _Run, step: Step, skip: set[str | None], queued: list[RawToolCall]
+    ) -> list[Message]:
+        """The step conversation, rebuilt from events: what was tried and what came back.
+
+        `queued` are the cut-off calls that will run next. They get an assistant message of their
+        own, so the tool results that follow them have a call to belong to."""
+        messages = self._step_messages(run, step, feedback=None)
+        messages[-1] = Message(
+            role="user",
+            content=(messages[-1].content or "")
+            + "\n\nThis step was interrupted and is being resumed. The calls already made "
+            "are shown as tool results. Do not repeat a change that already succeeded.",
+        )
+        for call, result in self._events.step_calls(run.task.id, step.id):
+            if result is None or call.correlation_id in skip:
+                continue
+            if result.payload["outcome"] == ToolOutcome.APPROVAL_REQUIRED.value:
+                continue  # the call that was approved later appears as its own pair
+            call_id = call.correlation_id or ""
+            text, _ = observation_text(
+                ToolOutcome(result.payload["outcome"]),
+                result.payload.get("result"),
+                result.payload.get("error"),
+            )
+            messages.append(
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        RawToolCall(
+                            id=call_id,
+                            name=call.payload["tool_name"],
+                            arguments=call.payload["arguments"],
+                        )
+                    ],
+                )
+            )
+            messages.append(Message(role="tool", tool_call_id=call_id, content=text))
+        if queued:
+            messages.append(Message(role="assistant", tool_calls=queued))
+        return messages
+
     # ------------------------------------------------------------------ helpers
 
     def _step_messages(self, run: _Run, step: Step, feedback: str | None) -> list[Message]:
@@ -680,6 +923,8 @@ class Controller:
         ]
 
     def _check_cancel(self, run: _Run) -> None:
+        if run.task.id in self._lost_leases:
+            raise LeaseLost(run.task.id)
         if run.task.id in self._cancel_requested:
             raise _Cancelled
 
@@ -770,6 +1015,7 @@ class Controller:
                 "final_answer": run.final_answer,
                 "step_results": run.step_results,
                 "pending_approval": run.pending.model_dump(mode="json") if run.pending else None,
+                "recovery": run.recovery,
                 "verification": run.verification.model_dump(mode="json")
                 if run.verification
                 else None,
@@ -795,6 +1041,7 @@ class Controller:
             plan=Plan.model_validate(snapshot["plan"]) if snapshot.get("plan") else None,
             final_answer=snapshot.get("final_answer"),
             step_results=dict(snapshot.get("step_results") or {}),
+            recovery=snapshot.get("recovery"),
             pending=PendingApproval.model_validate(snapshot["pending_approval"])
             if snapshot.get("pending_approval")
             else None,

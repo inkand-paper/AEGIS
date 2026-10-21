@@ -31,7 +31,8 @@ def make_v1_database(path: Path, *, stamp_version: bool = True) -> None:
     conn.executescript(memory._MIGRATION_1)
     conn.execute(
         "INSERT INTO events (task_id, type, payload, created_at, correlation_id) "
-        "VALUES ('t1', 'task_created', '{\"objective\": \"old task\"}', '2026-10-01T00:00:00', NULL)"
+        "VALUES ('t1', 'task_created', '{\"objective\": \"old task\"}', "
+        "'2026-10-01T00:00:00', NULL)"
     )
     conn.execute(
         "INSERT INTO checkpoints (task_id, snapshot, updated_at) "
