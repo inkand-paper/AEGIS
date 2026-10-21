@@ -5,6 +5,9 @@
     aegis status <task_id>         show where a task stands
     aegis approve <task_id>        review the pending call, and if you agree, carry on
     aegis cancel <task_id>         stop a task (this also denies a pending approval)
+    aegis resume <task_id>         carry on a task whose process died
+    aegis report <task_id>         final report and the files the task produced
+                                   (--replay also checks the event log for consistency)
 
 Exit codes: 0 completed, 1 failed, 2 waiting for approval, 3 cancelled, 4 usage error.
 """
@@ -18,13 +21,15 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from aegis.config import get_settings
-from aegis.controller import Controller, TaskNotFound
+from aegis.controller import TERMINAL, Controller, InvalidTransition, TaskNotFound
 from aegis.log import setup_logging
-from aegis.memory import EventLog
+from aegis.memory import EventLog, LeaseHeld
 from aegis.model_client import ModelClient
 from aegis.models import Budget, Task, TaskState
 from aegis.providers import ProviderConfigError, build_client
+from aegis.replay import replay
 from aegis.tools import default_registry
+from aegis.tools.diffing import sha256_hex
 from aegis.verifier import parse_criterion
 
 EXIT_CODES = {
@@ -86,6 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="skip the question (for scripts; you still own the risk)"
     )
 
+    resume = commands.add_parser("resume", help="carry on a task whose process was interrupted")
+    resume.add_argument("task_id")
+
+    report = commands.add_parser("report", help="the final report and the task's files")
+    report.add_argument("task_id")
+    report.add_argument(
+        "--replay",
+        action="store_true",
+        help="replay the event log and check it; exits 1 if anything is inconsistent",
+    )
+
     cancel = commands.add_parser("cancel", help="cancel a task; a pending approval is denied")
     cancel.add_argument("task_id")
     return parser
@@ -120,6 +136,17 @@ def render(snapshot: dict[str, Any]) -> str:
         lines.append(
             f"  -> `aegis approve {task_id}` to review it, `aegis cancel {task_id}` to deny"
         )
+    recovery = snapshot.get("recovery")
+    if recovery:
+        lines.append("recovery (the last time this task was resumed):")
+        lines.append(f"  step resumed: {recovery.get('resumed_step')}")
+        for call in recovery.get("interrupted_calls", []):
+            lines.append(f"  cut off before finishing: {call['tool_name']}")
+        for name, values in recovery.get("usage_drift", {}).items():
+            lines.append(
+                f"  usage drift in {name}: recorded {values['recorded']}, "
+                f"events say {values['from_events']} (corrected)"
+            )
     if snapshot.get("final_answer"):
         lines.append("final answer:")
         lines.extend(f"  {line}" for line in str(snapshot["final_answer"]).splitlines())
@@ -219,6 +246,12 @@ def _drive(controller: Controller, task_id: str, work: Coroutine[Any, Any, Task]
         finished = asyncio.run(work)
     except KeyboardInterrupt:
         finished = controller.get_task(task_id)
+    except LeaseHeld as exc:
+        print(f"error: {exc}. Wait for it to finish, or for its lease to expire.", file=sys.stderr)
+        return USAGE_ERROR
+    except InvalidTransition as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return USAGE_ERROR
     print()
     print(render(controller.snapshot(task_id)))
     return EXIT_CODES.get(finished.state, 1)
@@ -254,6 +287,69 @@ def _approve(args: argparse.Namespace, model: ModelClient | None = None) -> int:
             return USAGE_ERROR
     controller = _controller(model)
     return _drive(controller, args.task_id, controller.approve(args.task_id))
+
+
+def _resume(args: argparse.Namespace, model: ModelClient | None = None) -> int:
+    snapshot = EventLog(_events_path()).load_checkpoint(args.task_id)
+    if snapshot is None:
+        print(f"error: unknown task {args.task_id}", file=sys.stderr)
+        return USAGE_ERROR
+    state = snapshot["task"]["state"]
+    if TaskState(state) in TERMINAL:
+        print(f"error: task is already {state}; nothing to resume. Its report:", file=sys.stderr)
+        print(render(snapshot))
+        return USAGE_ERROR
+    if model is None:
+        try:
+            model = build_client(get_settings())
+        except ProviderConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return USAGE_ERROR
+    print(f"Resuming task {args.task_id} (was {state})...", file=sys.stderr)
+    controller = _controller(model)
+    return _drive(controller, args.task_id, controller.resume(args.task_id))
+
+
+def _report(args: argparse.Namespace) -> int:
+    log = EventLog(_events_path())
+    snapshot = log.load_checkpoint(args.task_id)
+    if snapshot is None:
+        print(f"error: unknown task {args.task_id}", file=sys.stderr)
+        return USAGE_ERROR
+    print(render(snapshot))
+    files = workspace_files(Path(snapshot["task"]["workspace_path"]))
+    print("files in the workspace:" if files else "files in the workspace: (none)")
+    for name, size, digest in files:
+        print(f"  {name}  {size} bytes  sha256:{digest[:16]}")
+    if not args.replay:
+        return 0
+    result = replay(log, args.task_id)
+    print()
+    print(
+        f"replay: {result.event_count} events, state {result.state.value if result.state else '?'}"
+    )
+    for note in result.notes:
+        print(f"  note: {note}")
+    for problem in result.problems:
+        print(f"  PROBLEM: {problem}")
+    print("replay: OK" if result.ok else "replay: INCONSISTENT")
+    return 0 if result.ok else 1
+
+
+def workspace_files(root: Path, limit: int = 200) -> list[tuple[str, int, str]]:
+    """The files a task left behind: (relative path, size, sha256). Symlinks are not followed."""
+    found: list[tuple[str, int, str]] = []
+    if not root.is_dir():
+        return found
+    for item in sorted(root.rglob("*")):
+        parts = item.relative_to(root).parts
+        if item.is_symlink() or not item.is_file() or "__pycache__" in parts:
+            continue
+        if ".pytest_cache" in parts or len(found) >= limit:
+            continue
+        data = item.read_bytes()
+        found.append((item.relative_to(root).as_posix(), len(data), sha256_hex(data)))
+    return found
 
 
 def _cancel(args: argparse.Namespace) -> int:
@@ -303,6 +399,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _submit(args)
     if args.command == "approve":
         return _approve(args)
+    if args.command == "resume":
+        return _resume(args)
+    if args.command == "report":
+        return _report(args)
     if args.command == "cancel":
         return _cancel(args)
     return _status(args)

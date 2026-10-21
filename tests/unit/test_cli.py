@@ -5,7 +5,7 @@ import pytest
 from fakes import ScriptedModel, call_tools, plan_json, say
 
 from aegis.config import get_settings
-from aegis.main import _approve, _submit, build_parser, main
+from aegis.main import _approve, _resume, _submit, build_parser, main
 
 
 @pytest.fixture(autouse=True)
@@ -232,3 +232,117 @@ def test_the_allow_flags_are_recorded_on_the_task(capsys: pytest.CaptureFixture[
     assert main(["status", task_id, "--json"]) == 0
     task = json.loads(capsys.readouterr().out)["task"]
     assert task["allowed_effects"] == ["execute", "workspace"]
+
+
+# ---------------------------------------------------------------- Phase 4: resume and report
+
+
+class ProcessDied(BaseException):
+    """Stands in for a killed process: nothing in the controller may catch it."""
+
+
+def crashing_model() -> ScriptedModel:
+    def die(messages: object) -> object:
+        raise ProcessDied  # the process is killed while waiting for the model
+
+    return ScriptedModel(
+        say(plan_json("Multiply")), call_tools(("calculator", {"expression": "17 * 23"})), die
+    )
+
+
+def crashed_task(capsys: pytest.CaptureFixture[str]) -> str:
+    with pytest.raises(ProcessDied):
+        _submit(build_parser().parse_args(["submit", "Multiply"]), model=crashing_model())
+    capsys.readouterr()
+    from aegis.main import _events_path
+    from aegis.memory import EventLog
+
+    log = EventLog(_events_path())
+    with log._conn:  # find the task id the way a user would: from the database
+        row = log._conn.execute("SELECT task_id FROM checkpoints").fetchone()
+    return str(row["task_id"])
+
+
+def resume_args(task_id: str) -> object:
+    return build_parser().parse_args(["resume", task_id])
+
+
+def test_resume_finishes_a_task_whose_process_died(capsys: pytest.CaptureFixture[str]) -> None:
+    task_id = crashed_task(capsys)
+    code = _resume(resume_args(task_id), model=ScriptedModel(say("The product is 391.")))  # type: ignore[arg-type]
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "state:      completed" in out
+    assert "recovery (the last time this task was resumed):" in out
+    assert "step resumed: 1" in out
+
+
+def test_resume_refuses_a_finished_task_and_prints_its_report(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    submit("Multiply", model=happy_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    assert main(["resume", task_id]) == 4
+    captured = capsys.readouterr()
+    assert "already completed" in captured.err
+    assert "state:      completed" in captured.out
+
+
+def test_resume_of_an_unknown_task_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["resume", "nope"]) == 4
+    assert "unknown task" in capsys.readouterr().err
+
+
+def test_resume_refuses_while_another_process_holds_the_task(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from aegis.main import _events_path
+    from aegis.memory import EventLog
+
+    task_id = crashed_task(capsys)
+    EventLog(_events_path()).acquire_lease(task_id, "pid4242-abc", ttl_s=300)
+    code = _resume(resume_args(task_id), model=ScriptedModel())  # type: ignore[arg-type]
+    assert code == 4
+    assert "pid4242-abc" in capsys.readouterr().err
+
+
+def test_report_lists_the_files_with_hashes_and_replays_the_log(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model = ScriptedModel(
+        say(plan_json("Write")),
+        call_tools(("fs_write", {"path": "out/result.txt", "content": "391\n"})),
+        say("done"),
+    )
+    submit("Write it", "--allow-writes", model=model)
+    task_id = task_id_from(capsys.readouterr().out)
+
+    assert main(["report", task_id, "--replay"]) == 0
+    out = capsys.readouterr().out
+    assert "files in the workspace:" in out
+    assert "out/result.txt  4 bytes  sha256:" in out
+    assert "replay: OK" in out
+
+
+def test_report_without_replay_does_not_replay(capsys: pytest.CaptureFixture[str]) -> None:
+    submit("Multiply", model=happy_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    assert main(["report", task_id]) == 0
+    assert "replay:" not in capsys.readouterr().out
+
+
+def test_report_replay_exits_1_for_an_inconsistent_log(capsys: pytest.CaptureFixture[str]) -> None:
+    from aegis.main import _events_path
+    from aegis.memory import EventLog
+    from aegis.models import EventType
+
+    submit("Multiply", model=happy_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    EventLog(_events_path()).append(task_id, EventType.ERROR, {"note": "after the end"})
+    assert main(["report", task_id, "--replay"]) == 1
+    out = capsys.readouterr().out
+    assert "PROBLEM" in out and "replay: INCONSISTENT" in out
+
+
+def test_report_of_an_unknown_task_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["report", "nope"]) == 4
