@@ -7,6 +7,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+# What a tool call can do to the world, from harmless to most dangerous:
+#   none       reads only
+#   workspace  creates or changes files inside the task workspace
+#   execute    runs a program on this computer (for example the project's tests)
+#   external   touches anything outside the workspace
+SideEffects = Literal["none", "workspace", "execute", "external"]
+
 
 class PolicyError(Exception):
     """A call was refused by policy (for example a path outside the workspace)."""
@@ -29,6 +36,9 @@ class ToolContext:
 
     task_id: str
     workspace: Path
+    # Side-effect classes the task declared up front (for example {"workspace"}). A call whose
+    # effect is not in this set needs a human approval before it runs.
+    allowed_effects: frozenset[str] = frozenset()
 
     def resolve(self, relative: str) -> Path:
         """Turn a workspace-relative path into a real path, or raise PolicyError.
@@ -55,12 +65,19 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
     description: str
     arg_model: type[A]
     result_model: type[R]
-    side_effects: Literal["none", "workspace", "external"]
+    side_effects: SideEffects
     requires_network: bool
     idempotent: bool
     # Names of argument fields that hold workspace-relative paths. The dispatcher checks
     # every one of them against the workspace BEFORE the tool runs.
+    # (a field may hold one path or a list of paths)
     path_fields: tuple[str, ...] = ()
+    # Overrides the dispatcher's default timeout. Set by slow tools such as the test runner.
+    timeout_s: float | None = None
+
+    def effective_side_effects(self, args: A) -> SideEffects:
+        """The side effect of THIS call. Tools override it so a dry run counts as harmless."""
+        return self.side_effects
 
     @abstractmethod
     async def execute(self, args: A, ctx: ToolContext) -> R: ...

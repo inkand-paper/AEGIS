@@ -69,8 +69,13 @@ class Executor:
         ctx: ToolContext,
         *,
         arguments_error: str | None = None,
+        approved: bool = False,
     ) -> ExecutionResult:
-        """Run one proposed call. `arguments_error` is a parse failure from the model client."""
+        """Run one proposed call. `arguments_error` is a parse failure from the model client.
+
+        `approved=True` means a human granted this exact call, so the approval gate is skipped.
+        Every other check (arguments, workspace policy) still runs.
+        """
         started_at = datetime.now(UTC)
         started = time.monotonic()
         self._events.append(
@@ -81,11 +86,12 @@ class Executor:
                 "tool_name": call.tool_name,
                 "arguments": call.arguments,
                 "step_id": call.step_id,
+                "approved": approved,
             },
             correlation_id=call.id,
         )
         try:
-            result = await self._run(call, ctx, arguments_error)
+            result = await self._run(call, ctx, arguments_error, approved)
         except asyncio.CancelledError:
             # Keep the P5 invariant (every TOOL_CALL has a TOOL_RESULT) even when cancelled.
             self._record_result(
@@ -115,7 +121,7 @@ class Executor:
     # ------------------------------------------------------------------ pipeline
 
     async def _run(
-        self, call: ToolCall, ctx: ToolContext, arguments_error: str | None
+        self, call: ToolCall, ctx: ToolContext, arguments_error: str | None, approved: bool
     ) -> _Result:
         # 1. Lookup
         try:
@@ -142,26 +148,28 @@ class Executor:
                 error="network tools are not allowed for this task",
             )
         for field in tool.path_fields:
+            value = getattr(args, field)
             try:
-                ctx.resolve(getattr(args, field))
+                for path in value if isinstance(value, list) else [value]:
+                    ctx.resolve(path)
             except PolicyError as exc:
                 logger.warning("policy violation: tool=%s field=%s: %s", tool.name, field, exc)
                 return _Result(ToolOutcome.POLICY_VIOLATION, error=str(exc))
 
-        # 4. Approval gate. Fail closed: side effects need the approval flow built in Phase 3.
-        if tool.side_effects != "none":
+        # 4. Approval gate. Fail closed: a side effect the task did not declare needs a human.
+        effects = tool.effective_side_effects(args)
+        if effects != "none" and effects not in ctx.allowed_effects and not approved:
             return _Result(
                 ToolOutcome.APPROVAL_REQUIRED,
-                error=f"{tool.name} has side effects ({tool.side_effects}) and needs approval",
+                error=f"{tool.name} has side effects ({effects}) and needs approval",
             )
 
         # 5. Execute (the TOOL_CALL event was already written, so a crash here is detectable)
+        timeout_s = tool.timeout_s if tool.timeout_s is not None else self._tool_timeout_s
         try:
-            raw = await asyncio.wait_for(tool.execute(args, ctx), timeout=self._tool_timeout_s)
+            raw = await asyncio.wait_for(tool.execute(args, ctx), timeout=timeout_s)
         except TimeoutError:
-            return _Result(
-                ToolOutcome.TIMEOUT, error=f"tool timed out after {self._tool_timeout_s:g}s"
-            )
+            return _Result(ToolOutcome.TIMEOUT, error=f"tool timed out after {timeout_s:g}s")
         except PolicyError as exc:
             logger.warning("policy violation inside tool=%s: %s", tool.name, exc)
             return _Result(ToolOutcome.POLICY_VIOLATION, error=str(exc))

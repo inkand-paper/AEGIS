@@ -34,7 +34,7 @@ class SpyTool(Tool[SpyArgs, SpyResult]):
     description = "test tool"
     arg_model = SpyArgs
     result_model = SpyResult
-    side_effects: Literal["none", "workspace", "external"] = "none"
+    side_effects: Literal["none", "workspace", "execute", "external"] = "none"
     requires_network = False
     idempotent = True
 
@@ -209,6 +209,50 @@ def test_tools_with_side_effects_fail_closed(events: EventLog, ctx: ToolContext)
     assert writer.runs == 0
 
 
+def test_a_declared_side_effect_runs_without_approval(events: EventLog, workspace: Path) -> None:
+    declared = ToolContext(
+        task_id="task1", workspace=workspace, allowed_effects=frozenset({"workspace"})
+    )
+    writer = SideEffectTool()
+    result = run(Executor(registry_with(writer), events), make_call("writer", {}), declared)
+    assert result.record.outcome is ToolOutcome.OK
+    assert writer.runs == 1
+
+
+def test_declaring_one_effect_does_not_allow_a_more_dangerous_one(
+    events: EventLog, workspace: Path
+) -> None:
+    class Runner(SideEffectTool):
+        name = "runner"
+        side_effects = "execute"
+
+    declared = ToolContext(
+        task_id="task1", workspace=workspace, allowed_effects=frozenset({"workspace"})
+    )
+    runner = Runner()
+    result = run(Executor(registry_with(runner), events), make_call("runner", {}), declared)
+    assert result.record.outcome is ToolOutcome.APPROVAL_REQUIRED
+    assert runner.runs == 0
+
+
+def test_an_approved_call_runs_and_is_marked_approved_in_the_log(
+    events: EventLog, ctx: ToolContext
+) -> None:
+    writer = SideEffectTool()
+    result = run(
+        Executor(registry_with(writer), events), make_call("writer", {}), ctx, approved=True
+    )
+    assert result.record.outcome is ToolOutcome.OK
+    assert events.events("task1", EventType.TOOL_CALL)[0].payload["approved"] is True
+
+
+def test_approval_does_not_bypass_the_workspace_check(events: EventLog, ctx: ToolContext) -> None:
+    call = make_call("fs_write", {"path": "../escape.txt", "content": "x"})
+    result = run(Executor(default_registry(), events), call, ctx, approved=True)
+    assert result.record.outcome is ToolOutcome.POLICY_VIOLATION
+    assert not (ctx.workspace.parent / "escape.txt").exists()
+
+
 def test_network_tools_are_refused(events: EventLog, ctx: ToolContext) -> None:
     fetcher = NetworkTool()
     result = run(Executor(registry_with(fetcher), events), make_call("fetcher", {}), ctx)
@@ -311,7 +355,15 @@ def test_every_tool_call_has_exactly_one_tool_result(events: EventLog, ctx: Tool
 
 def test_registry_lists_tools_in_the_neutral_model_format() -> None:
     listing = default_registry().list_for_model()
-    assert {tool["name"] for tool in listing} == {"calculator", "fs_list", "fs_read"}
+    assert {tool["name"] for tool in listing} == {
+        "calculator",
+        "fs_list",
+        "fs_read",
+        "fs_write",
+        "fs_edit",
+        "shell_run_tests",
+        "shell_run_formatter",
+    }
     calculator = next(t for t in listing if t["name"] == "calculator")
     assert calculator["parameters"]["required"] == ["expression"]
     assert calculator["parameters"]["properties"]["expression"]["type"] == "string"
