@@ -80,6 +80,7 @@ class EventType(StrEnum):
     VERIFICATION = "verification"
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_GRANTED = "approval_granted"
+    TASK_RESUMED = "task_resumed"  # added: a recovery after a crash, with what was found (8.2)
     BUDGET_EXCEEDED = "budget_exceeded"
     ERROR = "error"
 
@@ -106,6 +107,7 @@ class ToolOutcome(StrEnum):
     TOOL_ERROR = "tool_error"  # the tool ran and reported an expected failure
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"  # the process died before this call finished (recorded on resume)
     INTERNAL_ERROR = "internal_error"  # a bug in the tool, never the model's fault
 
 
@@ -147,6 +149,9 @@ class PendingApproval(BaseModel):
     arguments: dict[str, Any]
     reason: str
     turn: int  # which model turn of the step this happened in
+    # True when a human approved calls[0]. False for a recovered step: its calls still go
+    # through the normal approval gate.
+    approved: bool = True
     messages: list[dict[str, Any]]  # the step conversation so far
     calls: list[dict[str, Any]]  # the blocked call first, then any calls queued after it
     requested_at: datetime

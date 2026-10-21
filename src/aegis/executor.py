@@ -10,6 +10,7 @@ model mistakes show up in the audit trail.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -32,6 +33,9 @@ class _Result:
     result: dict[str, Any] | None = None
     error: str | None = None
     result_model: str | None = None
+    side_effects: str | None = None  # set on success: what this call was allowed to change
+    idempotency_key: str | None = None  # set for successful non-idempotent calls
+    deduplicated: bool = False  # True when the recorded result of an identical call was reused
 
 
 @dataclass
@@ -47,6 +51,27 @@ def _describe_validation_error(exc: ValidationError) -> str:
         where = ".".join(str(part) for part in item["loc"]) or "arguments"
         parts.append(f"{where}: {item['msg']}")
     return "; ".join(parts)
+
+
+def idempotency_key(task_id: str, step_id: str | None, tool_name: str, arguments: Any) -> str:
+    """Names one logical call: the same task, step, tool and (validated) arguments."""
+    text = json.dumps([task_id, step_id, tool_name, arguments], sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def observation_text(
+    outcome: ToolOutcome,
+    result: dict[str, Any] | None,
+    error: str | None,
+    limit: int = 4000,
+) -> tuple[str, bool]:
+    """The text the model sees for one call. Long results are cut so one call cannot flood it."""
+    if outcome is not ToolOutcome.OK:
+        return f"ERROR ({outcome.value}): {error}", False
+    text = json.dumps(result)
+    if len(text) <= limit:
+        return text, False
+    return text[:limit] + " ...[truncated]", True
 
 
 class Executor:
@@ -103,7 +128,9 @@ class Executor:
 
         summary, truncated = self._summarize(result)
         record = ToolCallRecord(
-            call=call,
+            call=call.model_copy(update={"idempotency_key": result.idempotency_key})
+            if result.idempotency_key
+            else call,
             started_at=started_at,
             finished_at=finished_at,
             outcome=result.outcome,
@@ -164,6 +191,26 @@ class Executor:
                 error=f"{tool.name} has side effects ({effects}) and needs approval",
             )
 
+        # 4b. Duplicate suppression. A call that is not idempotent is skipped when it repeats the
+        # most recent change exactly and nothing else has changed since (for example a model
+        # that re-proposes a write after a restart). Its recorded result is returned instead.
+        key: str | None = None
+        if not tool.idempotent and effects != "none":
+            key = idempotency_key(
+                ctx.task_id, call.step_id, tool.name, args.model_dump(mode="json")
+            )
+            previous = self._events.last_effectful_result(ctx.task_id)
+            if previous is not None and previous.get("idempotency_key") == key:
+                logger.info("tool %s: identical to the last change, not run again", tool.name)
+                return _Result(
+                    ToolOutcome.OK,
+                    result=previous["result"],
+                    result_model=previous["result_model"],
+                    side_effects=effects,
+                    idempotency_key=key,
+                    deduplicated=True,
+                )
+
         # 5. Execute (the TOOL_CALL event was already written, so a crash here is detectable)
         timeout_s = tool.timeout_s if tool.timeout_s is not None else self._tool_timeout_s
         try:
@@ -194,6 +241,8 @@ class Executor:
             ToolOutcome.OK,
             result=result.model_dump(mode="json"),
             result_model=tool.result_model.__name__,
+            side_effects=effects,
+            idempotency_key=key,
         )
 
     # ------------------------------------------------------------------ helpers
@@ -212,6 +261,9 @@ class Executor:
                 "result_model": result.result_model,
                 "result": result.result,
                 "error": result.error,
+                "side_effects": result.side_effects,
+                "idempotency_key": result.idempotency_key,
+                "deduplicated": result.deduplicated,
                 "duration_ms": round((time.monotonic() - started) * 1000),
             },
             correlation_id=call.id,
@@ -219,10 +271,6 @@ class Executor:
         return event.id
 
     def _summarize(self, result: _Result) -> tuple[str, bool]:
-        """The text the model sees. Long results are cut so one call cannot flood the context."""
-        if result.outcome is not ToolOutcome.OK:
-            return f"ERROR ({result.outcome.value}): {result.error}", False
-        text = json.dumps(result.result)
-        if len(text) <= self._max_summary_chars:
-            return text, False
-        return text[: self._max_summary_chars] + " ...[truncated]", True
+        return observation_text(
+            result.outcome, result.result, result.error, self._max_summary_chars
+        )

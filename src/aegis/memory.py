@@ -214,6 +214,38 @@ class EventLog:
         rows = self._conn.execute(query + " ORDER BY id", params).fetchall()
         return [_row_to_event(row) for row in rows]
 
+    def last_effectful_result(self, task_id: str) -> dict[str, Any] | None:
+        """The payload of the latest SUCCESSFUL tool result that changed something (or ran code).
+
+        Used for duplicate suppression: a non-idempotent call is skipped only when it is the same
+        call as the most recent change and nothing else has changed anything since.
+        """
+        row = self._conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND type = ? "
+            "AND json_extract(payload, '$.success') = 1 "
+            "AND json_extract(payload, '$.side_effects') IS NOT NULL "
+            "AND json_extract(payload, '$.side_effects') != 'none' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, EventType.TOOL_RESULT.value),
+        ).fetchone()
+        if row is None:
+            return None
+        payload: dict[str, Any] = json.loads(row["payload"])
+        return payload
+
+    def step_calls(self, task_id: str, step_id: str) -> list[tuple[Event, Event | None]]:
+        """Every tool call made for one step, oldest first, each with its result (or None)."""
+        results = {
+            e.correlation_id: e
+            for e in self.events(task_id, EventType.TOOL_RESULT)
+            if e.correlation_id
+        }
+        return [
+            (call, results.get(call.correlation_id or ""))
+            for call in self.events(task_id, EventType.TOOL_CALL)
+            if call.payload.get("step_id") == step_id
+        ]
+
     def unmatched_tool_calls(self, task_id: str) -> list[Event]:
         """TOOL_CALL events with no TOOL_RESULT. After a crash these are 'indeterminate'."""
         rows = self._conn.execute(
