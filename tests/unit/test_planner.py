@@ -84,3 +84,17 @@ def test_the_planning_prompt_forbids_unrequested_side_effects() -> None:
     from aegis.planner import PLAN_SYSTEM_PROMPT
 
     assert "Do NOT add steps that write, edit or run anything" in PLAN_SYSTEM_PROMPT
+
+
+def test_the_planning_prompt_tells_the_model_not_to_pretend_about_missing_tools() -> None:
+    """A live run planned 'compile with PyInstaller' although no tool can run it."""
+    from aegis.planner import PLAN_SYSTEM_PROMPT
+
+    assert "Only plan steps the tools below can really do" in PLAN_SYSTEM_PROMPT
+    assert "do not pretend" in PLAN_SYSTEM_PROMPT
+
+
+def test_the_agent_prompt_forbids_inventing_results() -> None:
+    from aegis.controller import AGENT_SYSTEM_PROMPT
+
+    assert "Never claim to have done what you did not do" in AGENT_SYSTEM_PROMPT

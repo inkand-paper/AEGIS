@@ -38,6 +38,9 @@ Rules:
 - Plan only what the objective asks for. Do NOT add steps that write, edit or run anything
   (files, tests, formatters) unless the objective says to. Reporting a result is done in the
   final answer, not by saving it to a file.
+- Only plan steps the tools below can really do. If part of the objective needs something no
+  tool can do (for example building an executable, installing software, or using the internet),
+  do not pretend: make the last step report plainly what could not be done and why.
 - The last step must produce the final answer to the objective.
 - depends_on lists the 1-based numbers of steps that must finish first. Leave it out to run
   the step after the previous one.
