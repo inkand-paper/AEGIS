@@ -35,12 +35,14 @@ from aegis.models import (
     EventType,
     Evidence,
     EvidenceKind,
+    PendingApproval,
     Plan,
     Step,
     StepStatus,
     Task,
     TaskState,
     ToolCall,
+    ToolOutcome,
     VerificationResult,
 )
 from aegis.planner import PlanError, Planner, execution_order
@@ -60,6 +62,8 @@ You work on ONE step of a plan at a time. For the current step:
   further tool call."""
 
 MAX_STEP_RESULT_CHARS = 500
+# Effects a task may declare up front. "external" can never be pre-approved.
+DECLARABLE_EFFECTS = frozenset({"workspace", "execute"})
 
 
 class BudgetExceeded(Exception):
@@ -76,6 +80,20 @@ class TaskNotFound(KeyError):
 
 class StepFailed(Exception):
     """A step used up all of its attempts."""
+
+
+class _ApprovalNeeded(Exception):
+    """Internal control flow: a call needs a human, so the task stops and waits."""
+
+    def __init__(
+        self, call_id: str, tool_name: str, arguments: dict[str, Any], reason: str
+    ) -> None:
+        super().__init__(reason)
+        self.call_id = call_id
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.reason = reason
+        self.pending: PendingApproval | None = None  # filled in by the step loop
 
 
 class _Cancelled(Exception):
@@ -126,6 +144,17 @@ def apply_transition(task: Task, new_state: TaskState, error: str | None = None)
     return previous
 
 
+def _evidence_kind(tool_name: str, result: dict[str, Any] | None) -> EvidenceKind:
+    """Classify a successful tool result, so the verifier can reason about tests and changes."""
+    data = result or {}
+    if tool_name == "shell_run_tests" and data.get("exit_code") == 0 and data.get("passed", 0) > 0:
+        return EvidenceKind.TEST_PASS
+    changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter"}
+    if changed_files and data.get("changed") is True and not data.get("dry_run"):
+        return EvidenceKind.FILE_DIFF
+    return EvidenceKind.TOOL_RESULT
+
+
 def _limits(usage: BudgetUsage, budget: Budget) -> list[tuple[str, Any, Any]]:
     return [
         ("model_calls", usage.model_calls, budget.max_model_calls),
@@ -164,6 +193,7 @@ class _Run:
     step_results: dict[str, str] = field(default_factory=dict)
     final_answer: str | None = None
     verification: VerificationResult | None = None
+    pending: PendingApproval | None = None
     started: float = field(default_factory=time.monotonic)
     base_wall_s: float = 0.0
 
@@ -207,9 +237,14 @@ class Controller:
         budget: Budget | None = None,
         acceptance: Sequence[str] = (),
         attach: Sequence[Path] = (),
+        allowed_effects: Sequence[str] = (),
     ) -> Task:
         if not objective.strip():
             raise ValueError("the objective is empty")
+        unknown = set(allowed_effects) - DECLARABLE_EFFECTS
+        if unknown:
+            allowed = sorted(DECLARABLE_EFFECTS)
+            raise ValueError(f"cannot pre-approve {sorted(unknown)}; allowed: {allowed}")
         criteria = [parse_criterion(text) for text in acceptance]  # raises ValueError if bad
         sources = [Path(item) for item in attach]
         names = [source.name for source in sources]
@@ -239,8 +274,11 @@ class Controller:
             created_at=now,
             updated_at=now,
             acceptance=[c.text for c in criteria],
+            allowed_effects=sorted(set(allowed_effects)),
         )
-        ctx = ToolContext(task_id=task_id, workspace=workspace)
+        ctx = ToolContext(
+            task_id=task_id, workspace=workspace, allowed_effects=frozenset(allowed_effects)
+        )
         run = _Run(task=task, ctx=ctx, criteria=criteria)
         self._runs[task_id] = run
         self._events.append(
@@ -250,6 +288,7 @@ class Controller:
                 "objective": task.objective,
                 "budget": task.budget.model_dump(mode="json"),
                 "acceptance": task.acceptance,
+                "allowed_effects": task.allowed_effects,
                 "attachments": names,
             },
         )
@@ -264,12 +303,39 @@ class Controller:
         if task.state in TERMINAL:
             return task
         if task.state is not TaskState.CREATED:
-            raise InvalidTransition(
-                f"task is {task.state.value}; resuming a started task arrives in Phase 4"
+            hint = (
+                "use approve"
+                if task.state is TaskState.WAITING_FOR_APPROVAL
+                else "resuming a started task arrives in Phase 4"
             )
+            raise InvalidTransition(f"task is {task.state.value}; {hint}")
         run.started = time.monotonic()
+        return await self._drive(run, resume=False)
+
+    async def approve(self, task_id: str) -> Task:
+        """Grant the pending approval and carry the task on to its next stopping point."""
+        run = self._load_run(task_id)
+        pending = run.pending
+        if run.task.state is not TaskState.WAITING_FOR_APPROVAL or pending is None:
+            raise InvalidTransition(f"task is {run.task.state.value}; no approval is pending")
+        self._events.append(
+            task_id,
+            EventType.APPROVAL_GRANTED,
+            {"tool_call_id": pending.tool_call_id, "tool_name": pending.tool_name, "by": "human"},
+            correlation_id=pending.tool_call_id,
+        )
+        run.base_wall_s = run.task.usage.wall_clock_s  # time spent waiting is not work
+        run.started = time.monotonic()
+        self._transition(run, TaskState.RUNNING, reason="approval granted")
+        return await self._drive(run, resume=True)
+
+    async def _drive(self, run: _Run, *, resume: bool) -> Task:
+        task = run.task
+        task_id = task.id
         try:
-            await self._execute(run)
+            await self._execute(run, resume=resume)
+        except _ApprovalNeeded as need:
+            self._request_approval(run, need)
         except _Cancelled:
             self._finish(run, TaskState.CANCELLED, reason="cancel requested")
         except BudgetExceeded as exc:
@@ -317,6 +383,10 @@ class Controller:
         if run.task.state is TaskState.CREATED:
             self._finish(run, TaskState.CANCELLED, reason="cancelled before start")
             return
+        if run.task.state is TaskState.WAITING_FOR_APPROVAL:
+            run.pending = None  # a denied approval: nothing is running, so cancel right away
+            self._finish(run, TaskState.CANCELLED, reason="approval denied")
+            return
         self._cancel_requested.add(task_id)
 
     def get_task(self, task_id: str) -> Task:
@@ -330,26 +400,36 @@ class Controller:
 
     # ------------------------------------------------------------------ the agent loop
 
-    async def _execute(self, run: _Run) -> None:
+    async def _execute(self, run: _Run, *, resume: bool = False) -> None:
         task = run.task
-        self._transition(run, TaskState.RUNNING, reason="started")
+        if resume:
+            assert run.plan is not None
+        else:
+            self._transition(run, TaskState.RUNNING, reason="started")
 
-        async def ask(
-            messages: list[Message], tools: list[dict[str, Any]], max_tokens: int
-        ) -> ModelResponse:
-            return await self._ask(run, messages, tools, max_tokens)
+            async def ask(
+                messages: list[Message], tools: list[dict[str, Any]], max_tokens: int
+            ) -> ModelResponse:
+                return await self._ask(run, messages, tools, max_tokens)
 
-        plan = await self._planner.create_plan(task, self._registry.list_for_model(), ask)
-        run.plan = plan
-        task.plan_id = plan.id
-        self._events.append(task.id, EventType.PLAN_CREATED, {"plan": plan.model_dump(mode="json")})
-        self._checkpoint(run)
+            plan = await self._planner.create_plan(task, self._registry.list_for_model(), ask)
+            run.plan = plan
+            task.plan_id = plan.id
+            self._events.append(
+                task.id, EventType.PLAN_CREATED, {"plan": plan.model_dump(mode="json")}
+            )
+            self._checkpoint(run)
 
+        plan = run.plan
+        assert plan is not None
         ordered = execution_order(plan)
         for position, step in enumerate(ordered, start=1):
             self._check_cancel(run)
+            if step.status is StepStatus.DONE:
+                continue  # finished before the task paused for approval
             logger.info("step %d/%d: %s", position, len(ordered), step.description)
-            run.step_results[step.id] = await self._run_step(run, step)
+            pending = run.pending if run.pending and run.pending.step_id == step.id else None
+            run.step_results[step.id] = await self._run_step(run, step, pending)
         run.final_answer = run.step_results[ordered[-1].id]
 
         self._transition(run, TaskState.VERIFYING, reason="all steps done")
@@ -382,16 +462,21 @@ class Controller:
         self._raise_if_over(run)
         self._transition(run, TaskState.COMPLETED, reason="verification passed")
 
-    async def _run_step(self, run: _Run, step: Step) -> str:
+    async def _run_step(
+        self, run: _Run, step: Step, pending: PendingApproval | None = None
+    ) -> str:
         feedback: str | None = None
-        for _ in range(self._max_step_attempts):
-            step.attempts += 1
+        resume = pending  # an attempt that paused for approval gets finished first
+        while step.attempts < self._max_step_attempts or resume is not None:
+            if resume is None:
+                step.attempts += 1
             step.status = StepStatus.IN_PROGRESS
             assert run.plan is not None
             run.plan.current_step_id = step.id
-            self._step_event(run, step, "in_progress")
+            self._step_event(run, step, "in_progress", resumed=resume is not None)
+            current, resume = resume, None
             try:
-                text = await self._step_attempt(run, step, feedback)
+                text = await self._step_attempt(run, step, feedback, current)
             except _StepAttemptFailed as exc:
                 feedback = str(exc)
                 logger.warning("step %d attempt %d failed: %s", step.index, step.attempts, feedback)
@@ -403,18 +488,56 @@ class Controller:
         self._step_event(run, step, "failed", error=feedback)
         raise StepFailed(f"step {step.index} failed after {step.attempts} attempts: {feedback}")
 
-    async def _step_attempt(self, run: _Run, step: Step, feedback: str | None) -> str:
-        messages = self._step_messages(run, step, feedback)
+    async def _step_attempt(
+        self,
+        run: _Run,
+        step: Step,
+        feedback: str | None,
+        resume: PendingApproval | None = None,
+    ) -> str:
         tools = self._registry.list_for_model()
-        for _ in range(self._max_turns_per_step):
-            response = await self._ask(run, messages, tools, self._max_output_tokens)
-            if response.tool_calls:
-                messages.append(
-                    Message(role="assistant", content=response.text, tool_calls=response.tool_calls)
-                )
-                for raw in response.tool_calls:
-                    observation = await self._run_tool(run, step, raw)
+        queued: list[RawToolCall] = []
+        first_turn = 0
+        approve_first = False
+        if resume is None:
+            messages = self._step_messages(run, step, feedback)
+        else:
+            run.pending = None
+            messages = [Message.model_validate(m) for m in resume.messages]
+            queued = [RawToolCall.model_validate(c) for c in resume.calls]
+            first_turn = resume.turn
+            approve_first = True  # the first queued call is the one a human just approved
+        for turn in range(first_turn, self._max_turns_per_step):
+            if queued:
+                calls, queued = queued, []
+            else:
+                response = await self._ask(run, messages, tools, self._max_output_tokens)
+                calls = response.tool_calls
+                if calls:
+                    messages.append(
+                        Message(role="assistant", content=response.text, tool_calls=calls)
+                    )
+            if calls:
+                for index, raw in enumerate(calls):
+                    try:
+                        observation = await self._run_tool(
+                            run, step, raw, approved=approve_first and index == 0
+                        )
+                    except _ApprovalNeeded as need:
+                        need.pending = PendingApproval(
+                            step_id=step.id,
+                            tool_call_id=need.call_id,
+                            tool_name=need.tool_name,
+                            arguments=need.arguments,
+                            reason=need.reason,
+                            turn=turn,
+                            messages=[m.model_dump(mode="json") for m in messages],
+                            calls=[c.model_dump(mode="json") for c in calls[index:]],
+                            requested_at=datetime.now(UTC),
+                        )
+                        raise
                     messages.append(Message(role="tool", tool_call_id=raw.id, content=observation))
+                approve_first = False
                 continue
             text = (response.text or "").strip()
             if text:
@@ -427,7 +550,9 @@ class Controller:
             )
         raise _StepAttemptFailed(f"no result after {self._max_turns_per_step} model turns")
 
-    async def _run_tool(self, run: _Run, step: Step, raw: RawToolCall) -> str:
+    async def _run_tool(
+        self, run: _Run, step: Step, raw: RawToolCall, *, approved: bool = False
+    ) -> str:
         task = run.task
         self._check_cancel(run)
         self._touch_wall(run)
@@ -441,7 +566,9 @@ class Controller:
             arguments=raw.arguments,
             requested_at=datetime.now(UTC),
         )
-        result = await self._executor.execute(call, run.ctx, arguments_error=raw.arguments_error)
+        result = await self._executor.execute(
+            call, run.ctx, arguments_error=raw.arguments_error, approved=approved
+        )
         record = result.record
         logger.info("tool %s -> %s", raw.name, record.outcome.value)
         if record.success:
@@ -449,7 +576,7 @@ class Controller:
                 id=uuid.uuid4().hex,
                 task_id=task.id,
                 step_id=step.id,
-                kind=EvidenceKind.TOOL_RESULT,
+                kind=_evidence_kind(raw.name, record.result),
                 payload={
                     "tool_name": raw.name,
                     "arguments": call.arguments,
@@ -469,6 +596,8 @@ class Controller:
             )
         self._checkpoint(run)
         self._raise_if_over(run)
+        if record.outcome is ToolOutcome.APPROVAL_REQUIRED:
+            raise _ApprovalNeeded(call.id, raw.name, raw.arguments, record.error or "")
         return result.observation.summary
 
     async def _ask(
@@ -611,6 +740,27 @@ class Controller:
         )
         self._checkpoint(run)
 
+    def _request_approval(self, run: _Run, need: _ApprovalNeeded) -> None:
+        pending = need.pending
+        assert pending is not None
+        run.pending = pending
+        self._events.append(
+            run.task.id,
+            EventType.APPROVAL_REQUESTED,
+            {
+                "tool_call_id": pending.tool_call_id,
+                "tool_name": pending.tool_name,
+                "arguments": pending.arguments,
+                "reason": pending.reason,
+                "step_id": pending.step_id,
+            },
+            correlation_id=pending.tool_call_id,
+        )
+        self._touch_wall(run)
+        self._transition(
+            run, TaskState.WAITING_FOR_APPROVAL, reason=f"{pending.tool_name} needs approval"
+        )
+
     def _checkpoint(self, run: _Run) -> None:
         self._events.save_checkpoint(
             run.task.id,
@@ -618,6 +768,8 @@ class Controller:
                 "task": run.task.model_dump(mode="json"),
                 "plan": run.plan.model_dump(mode="json") if run.plan else None,
                 "final_answer": run.final_answer,
+                "step_results": run.step_results,
+                "pending_approval": run.pending.model_dump(mode="json") if run.pending else None,
                 "verification": run.verification.model_dump(mode="json")
                 if run.verification
                 else None,
@@ -634,10 +786,22 @@ class Controller:
         task = Task.model_validate(snapshot["task"])
         run = _Run(
             task=task,
-            ctx=ToolContext(task_id=task.id, workspace=task.workspace_path),
+            ctx=ToolContext(
+                task_id=task.id,
+                workspace=task.workspace_path,
+                allowed_effects=frozenset(task.allowed_effects),
+            ),
             criteria=[parse_criterion(text) for text in task.acceptance],
             plan=Plan.model_validate(snapshot["plan"]) if snapshot.get("plan") else None,
             final_answer=snapshot.get("final_answer"),
+            step_results=dict(snapshot.get("step_results") or {}),
+            pending=PendingApproval.model_validate(snapshot["pending_approval"])
+            if snapshot.get("pending_approval")
+            else None,
+            evidence=[
+                Evidence.model_validate(event.payload)
+                for event in self._events.events(task_id, EventType.EVIDENCE_ADDED)
+            ],
             verification=VerificationResult.model_validate(snapshot["verification"])
             if snapshot.get("verification")
             else None,

@@ -30,9 +30,7 @@ def make_evidence(tool_name: str, arguments: dict[str, Any], result: dict[str, A
 CALC = make_evidence(
     "calculator", {"expression": "17 * 23"}, {"expression": "17 * 23", "value": 391}
 )
-READ = make_evidence(
-    "fs_read", {"path": "notes\\a.txt"}, {"path": "notes\\a.txt", "content": "hi"}
-)
+READ = make_evidence("fs_read", {"path": "notes\\a.txt"}, {"path": "notes\\a.txt", "content": "hi"})
 
 
 def verify(
@@ -126,3 +124,56 @@ def test_criterion_parsing() -> None:
     criterion = parse_criterion(" result_contains: 391 ")
     assert criterion.kind is CriterionKind.RESULT_CONTAINS
     assert criterion.argument == "391"
+
+
+# ---------------------------------------------------------------- Phase 3 criteria
+
+
+def kinded(
+    kind: EvidenceKind, tool: str, arguments: dict[str, Any], result: dict[str, Any], n: int
+) -> Evidence:
+    return make_evidence(tool, arguments, result).model_copy(update={"kind": kind, "id": f"e{n}"})
+
+
+PASSING = {"exit_code": 0, "passed": 3, "failed": 0, "errors": 0, "skipped": 0, "output": ""}
+WRITE = {"path": "calc.py", "changed": True, "dry_run": False}
+
+
+def test_tests_pass_needs_a_passing_run() -> None:
+    assert failed_names(verify(["tests_pass"])) == {"criterion:tests_pass"}
+    run_ = kinded(EvidenceKind.TEST_PASS, "shell_run_tests", {}, PASSING, 1)
+    assert verify(["tests_pass"], evidence=[run_]).passed is True
+
+
+def test_tests_pass_goes_stale_after_a_later_file_change() -> None:
+    run_ = kinded(EvidenceKind.TEST_PASS, "shell_run_tests", {}, PASSING, 1)
+    edit = kinded(EvidenceKind.FILE_DIFF, "fs_edit", {"path": "calc.py"}, WRITE, 2)
+    stale = verify(["tests_pass"], evidence=[run_, edit])
+    assert failed_names(stale) == {"criterion:tests_pass"}
+    assert "run the tests again" in next(
+        c["message"] for c in stale.checks if c["name"] == "criterion:tests_pass"
+    )
+    rerun = kinded(EvidenceKind.TEST_PASS, "shell_run_tests", {}, PASSING, 3)
+    assert verify(["tests_pass"], evidence=[run_, edit, rerun]).passed is True
+
+
+def test_a_change_before_the_test_run_is_fine() -> None:
+    edit = kinded(EvidenceKind.FILE_DIFF, "fs_edit", {"path": "calc.py"}, WRITE, 1)
+    run_ = kinded(EvidenceKind.TEST_PASS, "shell_run_tests", {}, PASSING, 2)
+    assert verify(["tests_pass"], evidence=[edit, run_]).passed is True
+
+
+def test_file_written_matches_only_real_changes_to_that_path() -> None:
+    edit = kinded(EvidenceKind.FILE_DIFF, "fs_edit", {"path": "./calc.py"}, WRITE, 1)
+    assert verify(["file_written:calc.py"], evidence=[edit]).passed is True
+    assert failed_names(verify(["file_written:other.py"], evidence=[edit])) == {
+        "criterion:file_written:other.py"
+    }
+    reading = [READ]  # reading a file is not writing it
+    assert verify(["file_written:notes/a.txt"], evidence=reading).passed is False
+
+
+def test_tests_pass_takes_no_value() -> None:
+    assert parse_criterion("tests_pass").kind is CriterionKind.TESTS_PASS
+    with pytest.raises(ValueError, match="takes no value"):
+        parse_criterion("tests_pass:yes")

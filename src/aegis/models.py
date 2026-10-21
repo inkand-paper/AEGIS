@@ -52,6 +52,8 @@ class Task(BaseModel):
     last_error: str | None = None
     verification_result_id: str | None = None  # added: §5.1 invariant needs it
     acceptance: list[str] = Field(default_factory=list)  # added: criteria from --accept
+    # added: side-effect classes the task declared up front ("workspace", "execute")
+    allowed_effects: list[str] = Field(default_factory=list)
 
 
 class ToolCall(BaseModel):
@@ -128,6 +130,26 @@ class Observation(BaseModel):
     summary: str  # short, for model context
     detail_ref: str | None = None  # pointer to the full record (the TOOL_RESULT event id)
     artifact_ids: list[str] = Field(default_factory=list)
+
+
+class PendingApproval(BaseModel):
+    """A tool call that is waiting for a human, plus what is needed to carry on afterwards.
+
+    Phase 4 adds full crash recovery; until then this is the one piece of in-progress state that
+    is saved, because without it `aegis approve` (a separate process) could not continue.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    tool_call_id: str  # the call that was blocked (its TOOL_RESULT says approval_required)
+    tool_name: str
+    arguments: dict[str, Any]
+    reason: str
+    turn: int  # which model turn of the step this happened in
+    messages: list[dict[str, Any]]  # the step conversation so far
+    calls: list[dict[str, Any]]  # the blocked call first, then any calls queued after it
+    requested_at: datetime
 
 
 class StepStatus(StrEnum):
