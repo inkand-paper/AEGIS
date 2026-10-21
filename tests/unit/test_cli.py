@@ -5,7 +5,7 @@ import pytest
 from fakes import ScriptedModel, call_tools, plan_json, say
 
 from aegis.config import get_settings
-from aegis.main import _submit, build_parser, main
+from aegis.main import _approve, _submit, build_parser, main
 
 
 @pytest.fixture(autouse=True)
@@ -119,3 +119,116 @@ def test_bad_command_line_arguments_exit_with_code_4() -> None:
     with pytest.raises(SystemExit) as info:
         main(["submit"])  # the objective is missing
     assert info.value.code == 4
+
+
+# ---------------------------------------------------------------- Phase 3: approval from the CLI
+
+
+def write_model() -> ScriptedModel:
+    return ScriptedModel(
+        say(plan_json("Write the file")),
+        call_tools(("fs_write", {"path": "hello.txt", "content": "hi\n"})),
+    )
+
+
+def task_id_from(out: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith("task:")).split()[1]
+
+
+def approve_args(task_id: str, *extra: str) -> object:
+    return build_parser().parse_args(["approve", task_id, *extra])
+
+
+def test_a_write_pauses_with_exit_code_2_and_says_how_to_continue(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = submit("Write hello.txt", model=write_model())
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "state:      waiting_for_approval" in out
+    assert "waiting for approval:" in out
+    assert "tool: fs_write" in out
+    assert "content: (1 lines)" in out and "| hi" in out  # the human sees what would be written
+    assert f"aegis approve {task_id_from(out)}" in out
+
+
+def test_allow_writes_skips_the_pause(capsys: pytest.CaptureFixture[str]) -> None:
+    model = ScriptedModel(
+        say(plan_json("Write the file")),
+        call_tools(("fs_write", {"path": "hello.txt", "content": "hi\n"})),
+        say("written"),
+    )
+    assert submit("Write hello.txt", "--allow-writes", model=model) == 0
+
+
+def test_approve_with_yes_finishes_the_task(capsys: pytest.CaptureFixture[str]) -> None:
+    submit("Write hello.txt", "--accept", "file_written:hello.txt", model=write_model())
+    task_id = task_id_from(capsys.readouterr().out)
+
+    code = _approve(
+        approve_args(task_id, "--yes"),
+        model=ScriptedModel(say("written")),  # type: ignore[arg-type]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "state:      completed" in out
+    assert "[pass] criterion:file_written:hello.txt" in out
+
+
+def test_answering_no_runs_nothing(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submit("Write hello.txt", model=write_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+    model = ScriptedModel()  # must not be called
+    code = _approve(approve_args(task_id), model=model)  # type: ignore[arg-type]
+
+    assert code == 2
+    assert "Nothing was run" in capsys.readouterr().out
+    assert model.calls == []
+    assert main(["status", task_id]) == 0
+    assert "waiting_for_approval" in capsys.readouterr().out
+
+
+def test_without_a_terminal_approve_demands_yes(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submit("Write hello.txt", model=write_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert _approve(approve_args(task_id), model=ScriptedModel()) == 4  # type: ignore[arg-type]
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_approve_rejects_unknown_and_finished_tasks(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["approve", "nope", "--yes"]) == 4
+    assert "unknown task" in capsys.readouterr().err
+    submit("Multiply", model=happy_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    assert main(["approve", task_id, "--yes"]) == 4
+    assert "nothing is waiting" in capsys.readouterr().err
+
+
+def test_cancel_denies_a_pending_approval(capsys: pytest.CaptureFixture[str]) -> None:
+    submit("Write hello.txt", model=write_model())
+    task_id = task_id_from(capsys.readouterr().out)
+
+    assert main(["cancel", task_id]) == 3
+    assert "state:      cancelled" in capsys.readouterr().out
+    assert main(["approve", task_id, "--yes"]) == 4
+
+
+def test_cancel_of_an_unknown_task_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["cancel", "nope"]) == 4
+    assert "unknown task" in capsys.readouterr().err
+
+
+def test_the_allow_flags_are_recorded_on_the_task(capsys: pytest.CaptureFixture[str]) -> None:
+    submit("Multiply", "--allow-writes", "--allow-exec", model=happy_model())
+    task_id = task_id_from(capsys.readouterr().out)
+    assert main(["status", task_id, "--json"]) == 0
+    task = json.loads(capsys.readouterr().out)["task"]
+    assert task["allowed_effects"] == ["execute", "workspace"]
