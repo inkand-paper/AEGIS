@@ -35,6 +35,9 @@ Break the objective into a short ordered plan. Reply with ONLY a JSON object, no
 Rules:
 - 1 to 10 steps. Each step is one concrete action that can be done with the tools below.
 - Use the tools for facts and calculations. Never plan to guess something a tool can compute.
+- Plan only what the objective asks for. Do NOT add steps that write, edit or run anything
+  (files, tests, formatters) unless the objective says to. Reporting a result is done in the
+  final answer, not by saving it to a file.
 - The last step must produce the final answer to the objective.
 - depends_on lists the 1-based numbers of steps that must finish first. Leave it out to run
   the step after the previous one.

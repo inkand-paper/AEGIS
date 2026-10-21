@@ -77,3 +77,10 @@ def test_plan_survives_a_json_round_trip() -> None:
     plan = build_plan("t", steps({"description": "a"}, {"description": "b"}))
     restored = type(plan).model_validate(json.loads(plan.model_dump_json()))
     assert restored == plan
+
+
+def test_the_planning_prompt_forbids_unrequested_side_effects() -> None:
+    """A live model once added 'write the result to result.txt' to a pure calculation task."""
+    from aegis.planner import PLAN_SYSTEM_PROMPT
+
+    assert "Do NOT add steps that write, edit or run anything" in PLAN_SYSTEM_PROMPT
