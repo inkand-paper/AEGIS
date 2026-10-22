@@ -26,6 +26,11 @@ class ToolError(Exception):
     """
 
 
+class ToolUnavailable(ToolError):
+    """The tool cannot work right now for a reason a retry will not fix (for example the browser
+    is not installed). The controller may replan around it (design doc section 10.2)."""
+
+
 class ToolNotFound(KeyError):
     """No tool is registered under that name."""
 
@@ -39,6 +44,9 @@ class ToolContext:
     # Side-effect classes the task declared up front (for example {"workspace"}). A call whose
     # effect is not in this set needs a human approval before it runs.
     allowed_effects: frozenset[str] = frozenset()
+    # Hosts the task may reach, as exact names or "*.example.com". Empty means no network at all.
+    # Declaring a host is what lets the "external" effect run without a per-call approval.
+    allowed_hosts: frozenset[str] = frozenset()
 
     def resolve(self, relative: str) -> Path:
         """Turn a workspace-relative path into a real path, or raise PolicyError.
@@ -74,6 +82,9 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
     path_fields: tuple[str, ...] = ()
     # Overrides the dispatcher's default timeout. Set by slow tools such as the test runner.
     timeout_s: float | None = None
+    # False for tools whose failed call will fail the same way again (a click on a button that is
+    # not there). The controller then refuses an identical repeat and makes the agent change course.
+    repeatable_after_failure: bool = True
 
     def effective_side_effects(self, args: A) -> SideEffects:
         """The side effect of THIS call. Tools override it so a dry run counts as harmless."""

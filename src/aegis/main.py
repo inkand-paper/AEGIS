@@ -80,6 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     submit.add_argument("--max-model-calls", type=int, help="override the model call budget")
     submit.add_argument("--max-tool-calls", type=int, help="override the tool call budget")
+    submit.add_argument(
+        "--max-replans",
+        type=int,
+        help="how many times the plan may be revised after a failure (0 turns replanning off)",
+    )
+    submit.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="let the task use the browser on this host (repeatable; example.com or "
+        "*.example.com). The agent may click anything on pages of an allowed host",
+    )
 
     status = commands.add_parser("status", help="show where a task stands")
     status.add_argument("task_id")
@@ -203,7 +216,11 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
     }
     try:
         budget = Budget.model_validate(
-            {**settings.default_budget.model_dump(), **{k: v for k, v in overrides.items() if v}}
+            {
+                **settings.default_budget.model_dump(),
+                **{k: v for k, v in overrides.items() if v},
+                **({} if args.max_replans is None else {"max_replans": args.max_replans}),
+            }
         )
     except ValueError as exc:
         print(f"error: invalid budget: {exc}", file=sys.stderr)
@@ -221,6 +238,7 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
             acceptance=args.accept,
             attach=[Path(p) for p in args.attach],
             allowed_effects=allowed,
+            allowed_hosts=args.allow_host,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

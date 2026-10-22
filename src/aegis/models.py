@@ -25,6 +25,7 @@ class Budget(BaseModel):
     max_tool_calls: int = Field(default=500, gt=0)
     max_tokens_total: int = Field(default=2_000_000, gt=0)
     max_dollars: Decimal = Field(default=Decimal("5.00"), gt=0)
+    max_replans: int = Field(default=3, ge=0)  # section 10.2; 0 turns replanning off
 
 
 class BudgetUsage(BaseModel):
@@ -54,6 +55,7 @@ class Task(BaseModel):
     acceptance: list[str] = Field(default_factory=list)  # added: criteria from --accept
     # added: side-effect classes the task declared up front ("workspace", "execute")
     allowed_effects: list[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class ToolCall(BaseModel):
@@ -109,6 +111,8 @@ class ToolOutcome(StrEnum):
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"  # the process died before this call finished (recorded on resume)
     INTERNAL_ERROR = "internal_error"  # a bug in the tool, never the model's fault
+    UNAVAILABLE = "unavailable"  # the tool cannot work right now (browser missing, network down)
+    REPEAT_BLOCKED = "repeat_blocked"  # the same call had already failed in this step
 
 
 class ToolCallRecord(BaseModel):

@@ -73,6 +73,9 @@ class CancellingTool(Tool[NoArgs, Done]):
         return Done(note="cancel requested")
 
 
+NO_REPLAN = Budget(max_replans=0)  # these tests are about the plain failure paths
+
+
 @pytest.fixture
 def events(tmp_path: Path) -> EventLog:
     return EventLog(tmp_path / "aegis.db")
@@ -379,7 +382,7 @@ def test_a_step_that_never_finishes_fails_after_its_attempts(
         *[call_tools(("calculator", {"expression": "1 + 1"})) for _ in range(4)],
     )
     controller = make(tmp_path, events, model, max_turns_per_step=2)
-    task = controller.create_task("Loop")
+    task = controller.create_task("Loop", budget=NO_REPLAN)
     finished = run(controller, task.id)
 
     assert finished.state is TaskState.FAILED
@@ -389,12 +392,10 @@ def test_a_step_that_never_finishes_fails_after_its_attempts(
     assert "previous attempt at this step failed" in (model.calls[3][-1].content or "")
 
 
-def test_a_task_that_never_used_a_tool_fails_verification(
-    tmp_path: Path, events: EventLog
-) -> None:
+def test_a_task_that_never_used_a_tool_fails_verification(tmp_path: Path, events: EventLog) -> None:
     model = ScriptedModel(say(plan_json("Just answer")), say("Done, no tools needed."))
     controller = make(tmp_path, events, model)
-    task = controller.create_task("Say something")
+    task = controller.create_task("Say something", budget=NO_REPLAN)
     finished = run(controller, task.id)
     assert finished.state is TaskState.FAILED
     assert "VerificationFailed" in (finished.last_error or "")
@@ -403,16 +404,14 @@ def test_a_task_that_never_used_a_tool_fails_verification(
     assert_ended_with(events, task.id, "failed")
 
 
-def test_an_unmet_acceptance_criterion_fails_verification(
-    tmp_path: Path, events: EventLog
-) -> None:
+def test_an_unmet_acceptance_criterion_fails_verification(tmp_path: Path, events: EventLog) -> None:
     model = ScriptedModel(
         say(plan_json("Calculate")),
         call_tools(("calculator", {"expression": "17 * 23"})),
         say("The answer is 391"),
     )
     controller = make(tmp_path, events, model)
-    task = controller.create_task("Calculate", acceptance=["result_contains:999"])
+    task = controller.create_task("Calculate", acceptance=["result_contains:999"], budget=NO_REPLAN)
     finished = run(controller, task.id)
     assert finished.state is TaskState.FAILED
     assert "criterion:result_contains:999" in (finished.last_error or "")

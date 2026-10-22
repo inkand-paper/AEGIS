@@ -1,4 +1,4 @@
-"""Initial planning (design doc section 10.1). Replanning arrives in a later phase.
+"""Planning (design doc section 10.1) and replanning (section 10.2).
 
 The model is asked for a plan as JSON. Its answer is untrusted input: it is parsed and
 validated (at least one step, a sane maximum, known dependencies, no cycles) before it is
@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aegis.model_client import Message, ModelResponse
-from aegis.models import Plan, Step, Task
+from aegis.models import Plan, Step, StepStatus, Task
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,27 @@ Rules:
 
 Available tools:
 {tools}"""
+
+
+REVISE_SYSTEM_PROMPT = """You are the planning component of AEGIS, an autonomous agent.
+A plan was being carried out and it hit a problem. Write the REMAINING steps only. Steps that are
+already done stay done and are not repeated. Reply with ONLY a JSON object, no other text:
+
+{"steps": [{"description": "...", "depends_on": [1]}]}
+
+Rules:
+- 1 to 10 steps. Each step is one concrete action that can be done with the tools below.
+- Do NOT repeat the approach that failed. Choose a different way, or a smaller piece of work.
+- Only plan what the tools below can really do. If the objective cannot be met with them, make
+  the single remaining step report plainly what could not be done and why. Do not pretend.
+- The last step must produce the final answer to the objective.
+- depends_on lists the 1-based numbers of the steps in THIS list that must finish first. Leave
+  it out to run the step after the previous one.
+
+Available tools:
+{tools}"""
+
+MAX_RESULT_CONTEXT_CHARS = 300
 
 
 def _extract_json(text: str) -> Any:
@@ -130,9 +151,7 @@ class Planner:
     def __init__(self, *, max_tokens: int = 4000) -> None:
         self._max_tokens = max_tokens
 
-    async def create_plan(
-        self, task: Task, tool_listing: list[dict[str, Any]], ask: Ask
-    ) -> Plan:
+    async def create_plan(self, task: Task, tool_listing: list[dict[str, Any]], ask: Ask) -> Plan:
         tools = "\n".join(f"- {t['name']}: {t['description']}" for t in tool_listing)
         messages = [
             Message(role="system", content=PLAN_SYSTEM_PROMPT.replace("{tools}", tools)),
@@ -155,3 +174,79 @@ class Planner:
                     )
                 )
         raise PlanError(last_error)
+
+    async def revise_plan(
+        self,
+        task: Task,
+        current: Plan,
+        step_results: dict[str, str],
+        trigger: str,
+        detail: str,
+        tool_listing: list[dict[str, Any]],
+        ask: Ask,
+        *,
+        revision: int,
+    ) -> Plan:
+        """Build the next plan: finished steps are kept as they are, the rest is re-planned."""
+        done = [s for s in execution_order(current) if s.status is StepStatus.DONE]
+        tools = "\n".join(f"- {t['name']}: {t['description']}" for t in tool_listing)
+        lines = [f"Objective: {task.objective}", "", "Steps already done:"]
+        if done:
+            for step in done:
+                result = step_results.get(step.id, "")[:MAX_RESULT_CONTEXT_CHARS]
+                lines.append(f"- {step.description} -> {result}")
+        else:
+            lines.append("- (none)")
+        failed = [s for s in current.steps if s.status is not StepStatus.DONE]
+        lines += ["", "Steps that were not finished:"]
+        lines += [f"- {s.description}" for s in failed] or ["- (none)"]
+        lines += ["", f"What went wrong ({trigger}): {detail[:600]}"]
+        messages = [
+            Message(role="system", content=REVISE_SYSTEM_PROMPT.replace("{tools}", tools)),
+            Message(role="user", content="\n".join(lines)),
+        ]
+        last_error = "unknown"
+        for attempt in (1, 2):
+            response = await ask(messages, [], self._max_tokens)
+            try:
+                fresh = build_plan(task.id, _extract_json(response.text or ""))
+                return merge_revision(current, done, fresh, revision)
+            except PlanError as exc:
+                last_error = str(exc)
+                logger.warning("revised plan attempt %d rejected: %s", attempt, last_error)
+                messages.append(Message(role="assistant", content=response.text or ""))
+                messages.append(
+                    Message(
+                        role="user",
+                        content=f"That plan was rejected: {last_error}. "
+                        "Reply again with ONLY the corrected JSON object.",
+                    )
+                )
+        raise PlanError(last_error)
+
+
+def merge_revision(current: Plan, done: list[Step], fresh: Plan, revision: int) -> Plan:
+    """Put the kept (done) steps in front of the new ones, under the new plan's id.
+
+    New steps that depended on nothing now run after the last kept step, so the order of work
+    stays one line from the start of the task to its final answer.
+    """
+    kept = [step.model_copy(update={"plan_id": fresh.id}) for step in done]
+    anchor = [kept[-1].id] if kept else []
+    offset = len(kept)
+    new_steps = [
+        step.model_copy(
+            update={"index": step.index + offset, "depends_on": step.depends_on or anchor}
+        )
+        for step in fresh.steps
+    ]
+    for index, step in enumerate(kept, start=1):
+        kept[index - 1] = step.model_copy(update={"index": index})
+    plan = Plan(
+        id=fresh.id,
+        task_id=current.task_id,
+        steps=[*kept, *new_steps],
+        revision=revision,
+    )
+    execution_order(plan)
+    return plan

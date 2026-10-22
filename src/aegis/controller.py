@@ -8,16 +8,17 @@ done. Only the verifier can then move the task to COMPLETED (P3).
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from aegis.executor import Executor, observation_text
 from aegis.log import redact
@@ -47,8 +48,9 @@ from aegis.models import (
     ToolOutcome,
     VerificationResult,
 )
+from aegis.netpolicy import normalise_hosts
 from aegis.planner import PlanError, Planner, execution_order
-from aegis.tools.base import ToolContext, ToolRegistry
+from aegis.tools.base import ToolContext, ToolNotFound, ToolRegistry
 from aegis.verifier import Criterion, Verifier, parse_criterion
 
 logger = logging.getLogger(__name__)
@@ -67,7 +69,7 @@ You work on ONE step of a plan at a time. For the current step:
 
 MAX_STEP_RESULT_CHARS = 500
 MAX_STORED_RESULT_CHARS = 4000  # a step's result text is kept in its event so a resume can use it
-# Effects a task may declare up front. "external" can never be pre-approved.
+# Effects a task may declare up front. "external" is only ever opened by naming hosts to allow.
 DECLARABLE_EFFECTS = frozenset({"workspace", "execute"})
 
 
@@ -85,6 +87,14 @@ class TaskNotFound(KeyError):
 
 class StepFailed(Exception):
     """A step used up all of its attempts."""
+
+
+class _Finished(Exception):
+    """Internal control flow: the task already reached a terminal state, nothing more to do."""
+
+
+class ReplanBudgetExceeded(Exception):
+    """The plan failed again after the task had used all of its replans (design doc 10.2)."""
 
 
 class _ApprovalNeeded(Exception):
@@ -190,6 +200,29 @@ def budget_exceeded(usage: BudgetUsage, budget: Budget) -> str | None:
     return None
 
 
+# Outcomes that say nothing about whether the same call could work later.
+_NOT_A_REAL_FAILURE = frozenset(
+    {ToolOutcome.APPROVAL_REQUIRED, ToolOutcome.CANCELLED, ToolOutcome.INTERRUPTED}
+)
+
+
+def _context(task: Task) -> ToolContext:
+    """What tools may know about the task. Declaring a host is what pre-approves "external"."""
+    effects = set(task.allowed_effects)
+    if task.allowed_hosts:
+        effects.add("external")
+    return ToolContext(
+        task_id=task.id,
+        workspace=task.workspace_path,
+        allowed_effects=frozenset(effects),
+        allowed_hosts=frozenset(task.allowed_hosts),
+    )
+
+
+def _call_key(step_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
+    return f"{step_id}|{tool_name}|{json.dumps(arguments, sort_keys=True, default=str)}"
+
+
 @dataclass
 class _Run:
     """Everything the controller keeps in memory about one task."""
@@ -206,6 +239,8 @@ class _Run:
     recovery: dict[str, Any] | None = None  # what the last resume found and did
     started: float = field(default_factory=time.monotonic)
     base_wall_s: float = 0.0
+    replans: int = 0  # how many times the plan was revised (counted from PLAN_REVISED events)
+    failed_calls: set[str] = field(default_factory=set)  # calls that failed in this process
 
 
 class Controller:
@@ -252,6 +287,7 @@ class Controller:
         acceptance: Sequence[str] = (),
         attach: Sequence[Path] = (),
         allowed_effects: Sequence[str] = (),
+        allowed_hosts: Sequence[str] = (),
     ) -> Task:
         if not objective.strip():
             raise ValueError("the objective is empty")
@@ -259,6 +295,7 @@ class Controller:
         if unknown:
             allowed = sorted(DECLARABLE_EFFECTS)
             raise ValueError(f"cannot pre-approve {sorted(unknown)}; allowed: {allowed}")
+        hosts = normalise_hosts(allowed_hosts)  # raises ValueError if bad
         criteria = [parse_criterion(text) for text in acceptance]  # raises ValueError if bad
         sources = [Path(item) for item in attach]
         names = [source.name for source in sources]
@@ -289,11 +326,9 @@ class Controller:
             updated_at=now,
             acceptance=[c.text for c in criteria],
             allowed_effects=sorted(set(allowed_effects)),
+            allowed_hosts=hosts,
         )
-        ctx = ToolContext(
-            task_id=task_id, workspace=workspace, allowed_effects=frozenset(allowed_effects)
-        )
-        run = _Run(task=task, ctx=ctx, criteria=criteria)
+        run = _Run(task=task, ctx=_context(task), criteria=criteria)
         self._runs[task_id] = run
         self._events.append(
             task_id,
@@ -303,6 +338,7 @@ class Controller:
                 "budget": task.budget.model_dump(mode="json"),
                 "acceptance": task.acceptance,
                 "allowed_effects": task.allowed_effects,
+                "allowed_hosts": task.allowed_hosts,
                 "attachments": names,
             },
         )
@@ -392,6 +428,8 @@ class Controller:
             if recover:
                 self._recover(run)
             await self._execute(run)
+        except _Finished:
+            pass
         except LeaseLost:
             raise  # not ours any more: write nothing, the new owner decides
         except _ApprovalNeeded as need:
@@ -413,8 +451,13 @@ class Controller:
                 run, TaskState.FAILED, reason="budget exceeded", error=f"BudgetExceeded: {exc}"
             )
         except PlanError as exc:
+            self._finish(run, TaskState.FAILED, reason="plan rejected", error=f"PlanInvalid: {exc}")
+        except ReplanBudgetExceeded as exc:
             self._finish(
-                run, TaskState.FAILED, reason="plan rejected", error=f"PlanInvalid: {exc}"
+                run,
+                TaskState.FAILED,
+                reason="replan budget exceeded",
+                error=f"ReplanBudgetExceeded: {exc}",
             )
         except StepFailed as exc:
             self._finish(run, TaskState.FAILED, reason="step failed", error=f"StepFailed: {exc}")
@@ -479,6 +522,26 @@ class Controller:
             )
             self._checkpoint(run)
 
+        while True:
+            problem = await self._work_plan(run)
+            if problem is None:
+                return
+            trigger, detail, give_up = problem
+            limit = task.budget.max_replans
+            if limit == 0:
+                give_up()  # replanning is switched off: keep the plain failure behaviour
+            if run.replans >= limit:
+                raise ReplanBudgetExceeded(
+                    f"the plan failed again after {run.replans} replans ({trigger}: {detail})"
+                )
+            await self._replan(run, trigger, detail)
+
+    async def _work_plan(self, run: _Run) -> tuple[str, str, Callable[[], NoReturn]] | None:
+        """Do the steps, then verify. Returns None when the task completed, else what went wrong.
+
+        The third item of the result is what to raise if no replan is possible.
+        """
+        task = run.task
         plan = run.plan
         assert plan is not None
         ordered = execution_order(plan)
@@ -488,7 +551,15 @@ class Controller:
                 continue  # finished before the task paused for approval
             logger.info("step %d/%d: %s", position, len(ordered), step.description)
             pending = run.pending if run.pending and run.pending.step_id == step.id else None
-            run.step_results[step.id] = await self._run_step(run, step, pending)
+            try:
+                run.step_results[step.id] = await self._run_step(run, step, pending)
+            except StepFailed as exc:
+                message = str(exc)
+
+                def stop(message: str = message) -> NoReturn:
+                    raise StepFailed(message)
+
+                return "step_failed", message, stop
         run.final_answer = run.step_results[ordered[-1].id]
 
         self._transition(run, TaskState.VERIFYING, reason="all steps done")
@@ -509,21 +580,69 @@ class Controller:
         )
         if not result.passed:
             problems = [f"{c['name']}: {c['message']}" for c in result.checks if not c["passed"]]
-            self._finish(
-                run,
-                TaskState.FAILED,
-                reason="verification failed",
-                error=f"VerificationFailed: {'; '.join(problems)}",
-            )
-            return
+            detail = "; ".join(problems)
+
+            def stop_verification() -> NoReturn:
+                self._finish(
+                    run,
+                    TaskState.FAILED,
+                    reason="verification failed",
+                    error=f"VerificationFailed: {detail}",
+                )
+                raise _Finished
+
+            return "verification_failed", detail, stop_verification
         task.verification_result_id = result.id
         self._touch_wall(run)
         self._raise_if_over(run)
         self._transition(run, TaskState.COMPLETED, reason="verification passed")
+        return None
 
-    async def _run_step(
-        self, run: _Run, step: Step, pending: PendingApproval | None = None
-    ) -> str:
+    async def _replan(self, run: _Run, trigger: str, detail: str) -> None:
+        """Ask for a new plan for the rest of the work and switch to it (design doc 10.2)."""
+        task = run.task
+        old = run.plan
+        assert old is not None
+        if task.state is TaskState.VERIFYING:
+            self._transition(run, TaskState.RUNNING, reason="replanning after failed verification")
+
+        async def ask(
+            messages: list[Message], tools: list[dict[str, Any]], max_tokens: int
+        ) -> ModelResponse:
+            return await self._ask(run, messages, tools, max_tokens)
+
+        number = run.replans + 1
+        logger.info("replan %d/%d (%s): %s", number, task.budget.max_replans, trigger, detail[:200])
+        plan = await self._planner.revise_plan(
+            task,
+            old,
+            run.step_results,
+            trigger,
+            detail,
+            self._registry.list_for_model(),
+            ask,
+            revision=old.revision + 1,
+        )
+        old.superseded_by = plan.id
+        run.plan = plan
+        run.replans = number
+        run.final_answer = None
+        run.verification = None
+        task.plan_id = plan.id
+        self._events.append(
+            task.id,
+            EventType.PLAN_REVISED,
+            {
+                "plan": plan.model_dump(mode="json"),
+                "supersedes": old.id,
+                "trigger": trigger,
+                "detail": detail[:1000],
+                "replan": number,
+            },
+        )
+        self._checkpoint(run)
+
+    async def _run_step(self, run: _Run, step: Step, pending: PendingApproval | None = None) -> str:
         feedback: str | None = None
         resume = pending  # an attempt that paused for approval gets finished first
         while step.attempts < self._max_step_attempts or resume is not None:
@@ -625,11 +744,30 @@ class Controller:
             arguments=raw.arguments,
             requested_at=datetime.now(UTC),
         )
+        key = _call_key(step.id, raw.name, raw.arguments)
+        refuse = None
+        if key in run.failed_calls:
+            refuse = (
+                "this exact call already failed in this step and would fail the same way. "
+                "Change what you do: use different arguments or another tool, or report that "
+                "this step cannot be done."
+            )
         result = await self._executor.execute(
-            call, run.ctx, arguments_error=raw.arguments_error, approved=approved
+            call,
+            run.ctx,
+            arguments_error=raw.arguments_error,
+            approved=approved,
+            refuse=refuse,
         )
         record = result.record
         logger.info("tool %s -> %s", raw.name, record.outcome.value)
+        if not record.success and record.outcome not in _NOT_A_REAL_FAILURE:
+            try:
+                repeatable = self._registry.get(raw.name).repeatable_after_failure
+            except ToolNotFound:
+                repeatable = False  # an unknown tool will still be unknown
+            if not repeatable:
+                run.failed_calls.add(key)
         if record.success:
             evidence = Evidence(
                 id=uuid.uuid4().hex,
@@ -720,11 +858,17 @@ class Controller:
 
         # 1. The plan and the step statuses. Events are written before the checkpoint, so after
         #    a crash the checkpoint can be one step behind. The events are the truth.
-        if run.plan is None:
-            created = log.events(task.id, EventType.PLAN_CREATED)
-            if created:
-                run.plan = Plan.model_validate(created[-1].payload["plan"])
-                task.plan_id = run.plan.id
+        planned = [
+            *log.events(task.id, EventType.PLAN_CREATED),
+            *log.events(task.id, EventType.PLAN_REVISED),
+        ]
+        planned.sort(key=lambda e: e.id)
+        if planned:
+            latest = Plan.model_validate(planned[-1].payload["plan"])
+            if run.plan is None or run.plan.id != latest.id:  # the checkpoint was one behind
+                run.plan = latest
+                task.plan_id = latest.id
+        run.replans = len(log.events(task.id, EventType.PLAN_REVISED))
         if run.plan is not None:
             steps = {step.id: step for step in run.plan.steps}
             for event in log.events(task.id, EventType.STATE_CHANGED):
@@ -1034,11 +1178,7 @@ class Controller:
         task = Task.model_validate(snapshot["task"])
         run = _Run(
             task=task,
-            ctx=ToolContext(
-                task_id=task.id,
-                workspace=task.workspace_path,
-                allowed_effects=frozenset(task.allowed_effects),
-            ),
+            ctx=_context(task),
             criteria=[parse_criterion(text) for text in task.acceptance],
             plan=Plan.model_validate(snapshot["plan"]) if snapshot.get("plan") else None,
             final_answer=snapshot.get("final_answer"),
@@ -1055,7 +1195,7 @@ class Controller:
             if snapshot.get("verification")
             else None,
             base_wall_s=task.usage.wall_clock_s,
+            replans=len(self._events.events(task_id, EventType.PLAN_REVISED)),
         )
         self._runs[task_id] = run
         return run
-

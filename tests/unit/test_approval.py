@@ -11,7 +11,7 @@ from fakes import ScriptedModel, call_tools, plan_json, say
 from aegis.controller import Controller, InvalidTransition
 from aegis.memory import EventLog
 from aegis.model_client import Message
-from aegis.models import EventType, Task, TaskState
+from aegis.models import Budget, EventType, Task, TaskState
 from aegis.tools import default_registry
 
 WRITE_A = ("fs_write", {"path": "a.txt", "content": "alpha\n"})
@@ -348,7 +348,9 @@ def test_tests_that_passed_before_a_later_edit_do_not_count(
         say("All done, tests pass."),
     )
     controller = make(tmp_path, events, model)
-    task = controller.create_task("add", acceptance=["tests_pass"], allowed_effects=BOTH)
+    task = controller.create_task(
+        "add", acceptance=["tests_pass"], allowed_effects=BOTH, budget=Budget(max_replans=0)
+    )
     finished = run(controller, task.id)
     assert finished.state is TaskState.FAILED
     assert "files changed afterwards" in (finished.last_error or "")
@@ -362,7 +364,9 @@ def test_failing_tests_do_not_count_as_passing(tmp_path: Path, events: EventLog)
         say("tests pass"),  # a false claim
     )
     controller = make(tmp_path, events, model)
-    task = controller.create_task("add", acceptance=["tests_pass"], allowed_effects=BOTH)
+    task = controller.create_task(
+        "add", acceptance=["tests_pass"], allowed_effects=BOTH, budget=Budget(max_replans=0)
+    )
     finished = run(controller, task.id)
     assert finished.state is TaskState.FAILED
     assert "no test run with exit code 0" in (finished.last_error or "")
@@ -382,5 +386,7 @@ def test_a_dry_run_is_not_a_file_change(tmp_path: Path, events: EventLog) -> Non
         say("ok"),
     )
     controller = make(tmp_path, events, model)
-    task = controller.create_task("add", acceptance=["tests_pass"], allowed_effects=BOTH)
+    task = controller.create_task(
+        "add", acceptance=["tests_pass"], allowed_effects=BOTH, budget=Budget(max_replans=0)
+    )
     assert run(controller, task.id).state is TaskState.COMPLETED

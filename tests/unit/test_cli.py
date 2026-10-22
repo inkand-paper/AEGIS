@@ -47,7 +47,9 @@ def test_submit_runs_a_task_and_prints_a_report(capsys: pytest.CaptureFixture[st
 
 
 def test_a_failed_task_exits_with_code_1(capsys: pytest.CaptureFixture[str]) -> None:
-    code = submit("Multiply", "--accept", "result_contains:999", model=happy_model())
+    code = submit(
+        "Multiply", "--accept", "result_contains:999", "--max-replans", "0", model=happy_model()
+    )
     assert code == 1
     assert "VerificationFailed" in capsys.readouterr().out
 

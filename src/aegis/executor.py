@@ -22,7 +22,14 @@ from pydantic import BaseModel, ValidationError
 
 from aegis.memory import EventLog
 from aegis.models import EventType, Observation, ToolCall, ToolCallRecord, ToolOutcome
-from aegis.tools.base import PolicyError, ToolContext, ToolError, ToolNotFound, ToolRegistry
+from aegis.tools.base import (
+    PolicyError,
+    ToolContext,
+    ToolError,
+    ToolNotFound,
+    ToolRegistry,
+    ToolUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +102,14 @@ class Executor:
         *,
         arguments_error: str | None = None,
         approved: bool = False,
+        refuse: str | None = None,
     ) -> ExecutionResult:
         """Run one proposed call. `arguments_error` is a parse failure from the model client.
 
         `approved=True` means a human granted this exact call, so the approval gate is skipped.
         Every other check (arguments, workspace policy) still runs.
+        `refuse` is a reason the controller gives for not running this call at all (it already
+        failed in this step and cannot succeed on a repeat). The call is still recorded (P5).
         """
         started_at = datetime.now(UTC)
         started = time.monotonic()
@@ -116,7 +126,7 @@ class Executor:
             correlation_id=call.id,
         )
         try:
-            result = await self._run(call, ctx, arguments_error, approved)
+            result = await self._run(call, ctx, arguments_error, approved, refuse)
         except asyncio.CancelledError:
             # Keep the P5 invariant (every TOOL_CALL has a TOOL_RESULT) even when cancelled.
             self._record_result(
@@ -148,7 +158,12 @@ class Executor:
     # ------------------------------------------------------------------ pipeline
 
     async def _run(
-        self, call: ToolCall, ctx: ToolContext, arguments_error: str | None, approved: bool
+        self,
+        call: ToolCall,
+        ctx: ToolContext,
+        arguments_error: str | None,
+        approved: bool,
+        refuse: str | None,
     ) -> _Result:
         # 1. Lookup
         try:
@@ -160,6 +175,9 @@ class Executor:
                 error=f"unknown tool {call.tool_name!r}. Available tools: {known}",
             )
 
+        if refuse is not None:
+            return _Result(ToolOutcome.REPEAT_BLOCKED, error=refuse)
+
         # 2. Argument validation
         if arguments_error is not None:
             return _Result(ToolOutcome.INVALID_ARGUMENTS, error=arguments_error)
@@ -169,10 +187,10 @@ class Executor:
             return _Result(ToolOutcome.INVALID_ARGUMENTS, error=_describe_validation_error(exc))
 
         # 3. Policy
-        if tool.requires_network:
+        if tool.requires_network and not ctx.allowed_hosts:
             return _Result(
                 ToolOutcome.POLICY_VIOLATION,
-                error="network tools are not allowed for this task",
+                error="network tools are not allowed for this task (no host was allowed)",
             )
         for field in tool.path_fields:
             value = getattr(args, field)
@@ -220,6 +238,8 @@ class Executor:
         except PolicyError as exc:
             logger.warning("policy violation inside tool=%s: %s", tool.name, exc)
             return _Result(ToolOutcome.POLICY_VIOLATION, error=str(exc))
+        except ToolUnavailable as exc:
+            return _Result(ToolOutcome.UNAVAILABLE, error=str(exc))
         except ToolError as exc:
             return _Result(ToolOutcome.TOOL_ERROR, error=str(exc))
         except Exception as exc:
