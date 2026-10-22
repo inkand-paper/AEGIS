@@ -40,6 +40,8 @@ def replay(log: EventLog, task_id: str) -> ReplayReport:
     requested: dict[str, int] = {}  # approvals asked for and not yet granted
     verification_passed = False
     terminal_at: int | None = None
+    current_plan: str | None = None
+    replans = 0
 
     if not events:
         return ReplayReport(
@@ -89,6 +91,18 @@ def replay(log: EventLog, task_id: str) -> ReplayReport:
             source = payload.get("source_tool_call_id", "")
             if not results.get(source, False):
                 problems.append(f"event {event.id}: evidence from a call that did not succeed")
+        elif kind is EventType.PLAN_CREATED:
+            current_plan = payload["plan"]["id"]
+        elif kind is EventType.PLAN_REVISED:
+            replans += 1
+            if payload.get("supersedes") != current_plan:
+                problems.append(
+                    f"event {event.id}: the revised plan does not replace the current one"
+                )
+            current_plan = payload["plan"]["id"]
+            limit = events[0].payload.get("budget", {}).get("max_replans")
+            if limit is not None and replans > int(limit):
+                problems.append(f"event {event.id}: replan {replans} is over the budget of {limit}")
         elif kind is EventType.VERIFICATION:
             verification_passed = bool(payload.get("passed"))
         elif kind is EventType.APPROVAL_REQUESTED:

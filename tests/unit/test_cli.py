@@ -348,3 +348,20 @@ def test_report_replay_exits_1_for_an_inconsistent_log(capsys: pytest.CaptureFix
 
 def test_report_of_an_unknown_task_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["report", "nope"]) == 4
+
+
+def test_allow_host_is_checked_and_stored(capsys: pytest.CaptureFixture[str]) -> None:
+    code = submit("Multiply", "--allow-host", "*", model=happy_model())
+    assert code == 4
+    assert "wildcards must look like" in capsys.readouterr().err
+
+    code = submit(
+        "Multiply 17 by 23", "--allow-host", "Example.com", "--allow-host", "a.org",
+        model=happy_model(),
+    )  # fmt: skip
+    assert code == 0
+    out = capsys.readouterr().out
+    task_id = next(line for line in out.splitlines() if line.startswith("task:")).split()[1]
+    assert main(["status", task_id, "--json"]) == 0
+    stored = json.loads(capsys.readouterr().out)["task"]
+    assert stored["allowed_hosts"] == ["a.org", "example.com"]

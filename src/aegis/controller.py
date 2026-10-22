@@ -168,6 +168,8 @@ def _evidence_kind(tool_name: str, result: dict[str, Any] | None) -> EvidenceKin
     data = result or {}
     if tool_name == "shell_run_tests" and data.get("exit_code") == 0 and data.get("passed", 0) > 0:
         return EvidenceKind.TEST_PASS
+    if tool_name in BROWSER_TOOLS and data.get("url"):
+        return EvidenceKind.BROWSER_STATE
     changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter"}
     if changed_files and data.get("changed") is True and not data.get("dry_run"):
         return EvidenceKind.FILE_DIFF
@@ -199,6 +201,8 @@ def budget_exceeded(usage: BudgetUsage, budget: Budget) -> str | None:
             return f"{name} {used}/{limit}"
     return None
 
+
+BROWSER_TOOLS = frozenset({"browser_navigate", "browser_read", "browser_click"})
 
 # Outcomes that say nothing about whether the same call could work later.
 _NOT_A_REAL_FAILURE = frozenset(
@@ -476,7 +480,17 @@ class Controller:
                 reason="internal error",
                 error=f"InternalError: {type(exc).__name__}",
             )
+        finally:
+            # A browser lives for one run: after a pause or a resume the agent navigates again.
+            try:
+                await self._registry.close_task(task_id)
+            except Exception:
+                logger.warning("task %s: releasing tool resources failed", task_id, exc_info=True)
         return task
+
+    def _tool_listing(self, task: Task) -> list[dict[str, Any]]:
+        """The tools this task may use: network tools only if a host was allowed."""
+        return self._registry.list_for_model(network=bool(task.allowed_hosts))
 
     def cancel(self, task_id: str) -> None:
         """Ask a task to stop. A running task stops at its next model or tool call boundary."""
@@ -514,7 +528,7 @@ class Controller:
             ) -> ModelResponse:
                 return await self._ask(run, messages, tools, max_tokens)
 
-            plan = await self._planner.create_plan(task, self._registry.list_for_model(), ask)
+            plan = await self._planner.create_plan(task, self._tool_listing(task), ask)
             run.plan = plan
             task.plan_id = plan.id
             self._events.append(
@@ -619,7 +633,7 @@ class Controller:
             run.step_results,
             trigger,
             detail,
-            self._registry.list_for_model(),
+            self._tool_listing(task),
             ask,
             revision=old.revision + 1,
         )
@@ -673,7 +687,7 @@ class Controller:
         feedback: str | None,
         resume: PendingApproval | None = None,
     ) -> str:
-        tools = self._registry.list_for_model()
+        tools = self._tool_listing(run.task)
         queued: list[RawToolCall] = []
         first_turn = 0
         approve_first = False

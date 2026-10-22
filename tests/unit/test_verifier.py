@@ -177,3 +177,36 @@ def test_tests_pass_takes_no_value() -> None:
     assert parse_criterion("tests_pass").kind is CriterionKind.TESTS_PASS
     with pytest.raises(ValueError, match="takes no value"):
         parse_criterion("tests_pass:yes")
+
+
+# ---------------------------------------------------------------- browser criteria
+
+
+def page(url: str, text: str, kind: EvidenceKind = EvidenceKind.BROWSER_STATE) -> Evidence:
+    shown = {"url": url, "title": "t", "text": text, "elements": [], "blocked_hosts": []}
+    item = make_evidence("browser_navigate", {"url": url}, shown)
+    return item.model_copy(update={"kind": kind, "id": f"page-{len(url)}-{len(text)}"})
+
+
+def test_page_contains_needs_a_page_the_browser_really_showed() -> None:
+    shown = page("http://h/order", "Order placed. Thank you.")
+    assert not failed_names(verify(["page_contains:order PLACED"], evidence=[CALC, shown]))
+    # the model only claiming it is not evidence
+    assert failed_names(verify(["page_contains:Order placed"], answer="Order placed!"))
+    # the text must be in a browser state, not just in any tool result
+    plain = page("http://h/", "Order placed", kind=EvidenceKind.TOOL_RESULT)
+    assert failed_names(verify(["page_contains:Order placed"], evidence=[CALC, plain]))
+
+
+def test_url_contains_looks_at_the_last_page_only() -> None:
+    first = page("http://h/order", "a")
+    last = page("http://h/products", "b")
+    assert failed_names(verify(["url_contains:/order"], evidence=[CALC, first, last]))
+    assert not failed_names(verify(["url_contains:/products"], evidence=[CALC, first, last]))
+    assert failed_names(verify(["url_contains:/order"]))  # no browser evidence at all
+
+
+def test_browser_criteria_need_a_value() -> None:
+    for text in ("page_contains", "url_contains:"):
+        with pytest.raises(ValueError, match="needs a value"):
+            parse_criterion(text)

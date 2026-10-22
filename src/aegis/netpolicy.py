@@ -17,9 +17,11 @@ import ipaddress
 from collections.abc import Collection, Iterable
 from urllib.parse import urlsplit
 
-from aegis.tools.base import PolicyError
-
 _SCHEMES = {"http": 80, "https": 443}
+
+
+class HostNotAllowed(ValueError):
+    """The URL is not one this task may reach. The message says why, for the model and the log."""
 
 
 def _split(pattern: str) -> tuple[str, int | None]:
@@ -41,12 +43,11 @@ def normalise_hosts(patterns: Iterable[str]) -> list[str]:
     cleaned: list[str] = []
     for pattern in patterns:
         host, port = _split(str(pattern))
-        if host in {"*", "*."} or host.startswith("*") and not host.startswith("*."):
-            raise ValueError(f"a bare wildcard is not allowed: {pattern!r}")
-        if host.startswith("*.") and ("*" in host[2:] or "." not in host[2:]):
-            raise ValueError(f"wildcards must look like *.example.com: {pattern!r}")
-        if host.startswith("*.") and _is_ip(host[2:]):
-            raise ValueError(f"a wildcard cannot be used with an address: {pattern!r}")
+        if "*" in host:
+            if not host.startswith("*.") or "*" in host[2:] or "." not in host[2:]:
+                raise ValueError(f"wildcards must look like *.example.com: {pattern!r}")
+            if _is_ip(host[2:]) or _is_private(host[2:]):
+                raise ValueError(f"a wildcard cannot be used with a local address: {pattern!r}")
         entry = host if port is None else f"{host}:{port}"
         if entry not in cleaned:
             cleaned.append(entry)
@@ -72,22 +73,22 @@ def _is_private(host: str) -> bool:
 
 
 def check_url(url: str, allowed: Collection[str]) -> str:
-    """Return the host of `url` if the task may reach it, else raise PolicyError."""
+    """Return the host of `url` if the task may reach it, else raise HostNotAllowed."""
     if not allowed:
-        raise PolicyError("this task has no allowed hosts")
+        raise HostNotAllowed("this task has no allowed hosts")
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:
-        raise PolicyError(f"not a valid URL: {url!r}") from None
+        raise HostNotAllowed(f"not a valid URL: {url!r}") from None
     scheme = parts.scheme.lower()
     if scheme not in _SCHEMES:
-        raise PolicyError(f"only http and https are allowed, not {scheme or 'a relative URL'!r}")
+        raise HostNotAllowed(f"only http and https are allowed, not {scheme or 'a relative URL'!r}")
     if parts.username or parts.password:
-        raise PolicyError("URLs with a user name or password are not allowed")
+        raise HostNotAllowed("URLs with a user name or password are not allowed")
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
-        raise PolicyError(f"the URL has no host: {url!r}")
+        raise HostNotAllowed(f"the URL has no host: {url!r}")
     effective_port = port if port is not None else _SCHEMES[scheme]
     private = _is_private(host)
     for entry in allowed:
@@ -100,4 +101,4 @@ def check_url(url: str, allowed: Collection[str]) -> str:
         elif host == pattern:
             return host
     kind = "a local or private address that is not explicitly allowed" if private else "not allowed"
-    raise PolicyError(f"host {host!r} is {kind}. Allowed: {', '.join(sorted(allowed))}")
+    raise HostNotAllowed(f"host {host!r} is {kind}. Allowed: {', '.join(sorted(allowed))}")

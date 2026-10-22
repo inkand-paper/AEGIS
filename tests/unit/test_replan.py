@@ -270,3 +270,29 @@ def test_the_revised_plan_may_not_exceed_the_step_limit() -> None:
     too_many = {"steps": [{"description": f"s{i}"} for i in range(MAX_STEPS + 1)]}
     with pytest.raises(Exception, match="maximum"):
         build_plan("t", too_many)
+
+
+def test_a_replanned_task_replays_cleanly(tmp_path: Path, events: EventLog) -> None:
+    from aegis.replay import replay
+
+    model = ScriptedModel(*stuck_step_script(), say(plan_json("Report the sum")), say("2"))
+    controller = make(tmp_path, events, model, max_turns_per_step=2)
+    task = controller.create_task("Add")
+    run(controller, task.id)
+    report = replay(events, task.id)
+    assert report.ok, report.problems
+
+
+def test_replay_flags_a_replan_over_the_budget(tmp_path: Path, events: EventLog) -> None:
+    from aegis.replay import replay
+
+    model = ScriptedModel(*stuck_step_script(), say(plan_json("Report the sum")), say("2"))
+    controller = make(tmp_path, events, model, max_turns_per_step=2)
+    task = controller.create_task("Add", budget=Budget(max_replans=3))
+    run(controller, task.id)
+    revised = events.events(task.id, EventType.PLAN_REVISED)[0]
+    for _ in range(3):  # forge extra replans, as a damaged or edited log would have
+        events.append(task.id, EventType.PLAN_REVISED, revised.payload)
+    problems = replay(events, task.id).problems
+    assert any("over the budget" in p for p in problems)
+    assert any("does not replace the current one" in p for p in problems)

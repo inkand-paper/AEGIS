@@ -354,7 +354,7 @@ def test_every_tool_call_has_exactly_one_tool_result(events: EventLog, ctx: Tool
 
 
 def test_registry_lists_tools_in_the_neutral_model_format() -> None:
-    listing = default_registry().list_for_model()
+    listing = default_registry().list_for_model(network=False)
     assert {tool["name"] for tool in listing} == {
         "calculator",
         "fs_list",
@@ -367,6 +367,13 @@ def test_registry_lists_tools_in_the_neutral_model_format() -> None:
     calculator = next(t for t in listing if t["name"] == "calculator")
     assert calculator["parameters"]["required"] == ["expression"]
     assert calculator["parameters"]["properties"]["expression"]["type"] == "string"
+
+
+def test_network_tools_are_only_listed_when_the_task_may_use_a_network() -> None:
+    registry = default_registry()
+    with_network = {t["name"] for t in registry.list_for_model(network=True)}
+    without = {t["name"] for t in registry.list_for_model(network=False)}
+    assert with_network - without == {"browser_navigate", "browser_read", "browser_click"}
 
 
 def test_registering_a_name_twice_fails() -> None:

@@ -93,6 +93,10 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
     @abstractmethod
     async def execute(self, args: A, ctx: ToolContext) -> R: ...
 
+    async def close_task(self, task_id: str) -> None:
+        """Release anything held for a task (a browser, for example). Called when a run ends."""
+        return None
+
 
 class ToolRegistry:
     """Explicit registration only. There is no auto-discovery (it hides the attack surface)."""
@@ -114,8 +118,16 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
-    def list_for_model(self) -> list[dict[str, Any]]:
-        """The tool list in the neutral format that ModelClient.generate() accepts."""
+    async def close_task(self, task_id: str) -> None:
+        for tool in self._tools.values():
+            await tool.close_task(task_id)
+
+    def list_for_model(self, *, network: bool = True) -> list[dict[str, Any]]:
+        """The tool list in the neutral format that ModelClient.generate() accepts.
+
+        `network=False` leaves out the tools that need a network, so a task that was allowed no
+        host is never offered them (and never plans around them).
+        """
         return [
             {
                 "name": tool.name,
@@ -123,4 +135,5 @@ class ToolRegistry:
                 "parameters": tool.arg_model.model_json_schema(),
             }
             for tool in self._tools.values()
+            if network or not tool.requires_network
         ]

@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13.5"
 dependencies = [
     "httpx>=0.28.1",
+    "playwright>=1.64.0",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.16.0",
     "rich>=15.0.0",
