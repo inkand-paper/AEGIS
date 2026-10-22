@@ -14,6 +14,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 2 | Tools, dispatcher, event log, agent loop, verifier | done |
 | 3 | Write and edit tools, allowlisted shell, approval flow | done |
 | 4 | Durable state, crash recovery (`resume`), event-log replay | done |
+| 5 | Replanning, network allowlist, browser (Playwright) | done |
 
 ## Setup
 
@@ -54,7 +55,8 @@ uv run aegis status <task_id>
 ```
 
 Acceptance criteria: `tool_used:<tool>`, `result_contains:<text>`, `file_read:<path>`,
-`answer_contains:<text>`, `file_written:<path>`, `tests_pass`. A task only completes if the
+`answer_contains:<text>`, `file_written:<path>`, `tests_pass`, `page_contains:<text>`,
+`url_contains:<text>`. A task only completes if the
 verifier finds matching tool evidence. `tests_pass` needs a `shell_run_tests` run that exited 0
 with at least one passing test, and it goes stale: if any file changed after that run, the task
 must run the tests again.
@@ -113,6 +115,46 @@ first), and a database written by a newer AEGIS is refused rather than damaged.
 `report --replay` replays the log and exits 1 if anything breaks the rules (an illegal state change,
 a call without a result, evidence from a failed call, COMPLETED without a passing verification).
 
+## Replanning
+
+When a step fails after its attempts, or the verifier rejects the result, AEGIS does not just stop.
+It asks the model for a new plan for the REMAINING work (finished steps are kept, not redone) and
+tells it what went wrong and not to repeat that approach. This is bounded: at most 3 replans by
+default (`--max-replans N`, `0` turns it off). After that the task fails with `ReplanBudgetExceeded`.
+Every replan is a `PLAN_REVISED` event, so `aegis report <id> --replay` shows it.
+
+## Browser
+
+The agent can read and click through web pages, but only on hosts you name. A task starts with NO
+network access:
+
+```bash
+uv run playwright install chromium     # once, downloads the browser (about 150 MB)
+uv run aegis submit "Open http://localhost:8000 and tell me what the product list shows" \
+    --allow-host localhost:8000 --accept page_contains:Item
+```
+
+Tools: `browser_navigate` (open a URL), `browser_read` (read the page again) and `browser_click`.
+Pages are given to the model as text plus a numbered list of links and buttons. There is no
+screenshot, and there is NO tool that types, so the agent cannot log in or fill in a form.
+
+- `--allow-host example.com` allows that exact host; `*.example.com` allows its subdomains (not
+  `example.com` itself); add `:port` to restrict the port. Repeat the flag for more hosts.
+- Every request the page makes is checked, not just the first one: images, scripts and redirects
+  to other hosts are blocked, and the blocked hosts are reported to the agent. Local and private
+  addresses (`localhost`, `127.0.0.1`, `192.168.x.x`, `169.254.x.x`) are refused unless you name
+  them exactly. New windows, downloads and WebSockets are blocked.
+- A click must say what the page should show afterwards. If the page does not show it, the click
+  FAILS and the agent is told what the page shows instead. An identical failed click is refused if
+  repeated, so the agent has to choose something else (or the plan is revised).
+- `page_contains:<text>` (a page the browser really showed) and `url_contains:<text>` (the last
+  page) are acceptance criteria, so a task cannot complete on a page that was never shown.
+- Read this before allowing a host: the agent can click ANYTHING on that host's pages that a
+  visitor could click (buy, delete, send). Allow only hosts where that is acceptable.
+- The browser exists for one run. After an approval pause or `resume`, the agent opens the page
+  again. If Chromium is not installed the browser tools report that, and the browser tests are
+  skipped. `AEGIS_BROWSER_EXECUTABLE` can point to another Chromium.
+
 ## Development
 
 ```bash
@@ -121,7 +163,8 @@ uv run mypy src
 uv run pytest
 ```
 
-Some filesystem tests create symlinks and are skipped where the OS does not allow it (on Windows,
+Browser tests start a real headless Chromium against local test pages (run `uv run playwright
+install chromium` first, otherwise they are skipped). Some filesystem tests create symlinks and are skipped where the OS does not allow it (on Windows,
 enable Developer Mode).
 
 ## Safety model

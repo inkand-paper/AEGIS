@@ -639,6 +639,11 @@ This section exists so the changes are explicit and reviewable.
 10. **(Phase 3) Approval continues a paused task by saving the paused step's conversation** (`PendingApproval`), because `aegis approve` runs in a separate process. Crash recovery (Phase 4) rebuilds the interrupted step from events instead.
 11. **(Phase 4) One worker per task** is enforced with a lease and heartbeat, so two processes never drive the same task. Not in the original design; required for `resume` to be safe.
 12. **(Phase 4) Idempotency keys** suppress an exact repeat of the most recent change when nothing else has changed since, returning the recorded result instead of running it again.
+13. **(Phase 5) Replanning is built in Phase 5, not later**, because its exit criterion needs it. Triggers 1 (a step failed after its attempts) and 2 (the verifier rejected completion) are implemented. Trigger 3 is not a separate trigger: an unavailable tool (`ToolUnavailable`, outcome `unavailable`) fails its step, and that failure triggers the replan. Trigger 4 (human-approved replan) is NOT built. The replan keeps finished steps, asks the model only for the remaining steps, and is capped by `Budget.max_replans` (default 3; 0 turns it off). PLAN_REVISED is an event, crash recovery uses the latest plan, and `replay` checks the replan count against the budget.
+14. **(Phase 5) The browser is text and DOM only.** There is no `browser_screenshot` (the free-tier model has no vision, and a screenshot would be unread evidence) and no tool that types (`browser_type`): the agent can read, follow links and press buttons, so it cannot log in or fill a form. `browser_click` takes an element id from the last page listing plus that element's exact text, and MUST state a post-condition (`expect_text` or `expect_url_contains`); without it the call is rejected, and if the page does not show it the call fails. Page-state evidence is `BROWSER_STATE`; new acceptance criteria are `page_contains:<text>` (any page the browser showed) and `url_contains:<text>` (the last page).
+15. **(Phase 5) `external` is opened per host, not per call.** `--allow-host example.com` (or `*.example.com`, optionally `:port`) lets a task use the browser on that host only. Every request the page makes goes through the allowlist, and redirects are checked hop by hop (Chromium would otherwise follow a redirect to any host by itself: a test found this). Local and private addresses are refused unless named exactly. A task with no host gets no network tools at all. Known limits: a public name made to resolve to a private address (DNS rebinding) is not caught until the Phase 6 container; and allowing a host lets the agent click anything on its pages.
+16. **(Phase 5) A browser lives for one run of a task.** After an approval pause or a `resume` the page is gone and the agent navigates again. The repeat guard is in memory too: after a `resume`, one identical repeat of an earlier failed call is allowed.
+17. **(Phase 5) A call to a tool whose failure repeats** (`repeatable_after_failure = False`, currently `browser_click`) is refused with outcome `repeat_blocked` when the identical call already failed in the same step. The refusal is still a recorded TOOL_CALL and TOOL_RESULT (P5).
 
 ---
 
@@ -768,6 +773,7 @@ Anything beyond that is v0.2+.
 |---------|------|--------|
 | 0.1 | — | Initial design doc. Supersedes the original planning note. Incorporates the review points: Phase 2 persistence, mandatory result models, deterministic verifier, explicit threat model, bounded replanning, first-class budgets, provider decision as a blocker. |
 | 0.2 | 2026-10 | Implementation notes for Phases 2 to 4: deviations 8 to 12 in section 14. No change to the contracts in sections 5 to 9. |
+| 0.3 | 2026-10 | Implementation notes for Phase 5: deviations 13 to 17 in section 14 (replanning built now, text-only browser, per-host `external`, browser lifetime, repeat guard). |
 
 ---
 
