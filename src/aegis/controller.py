@@ -170,7 +170,7 @@ def _evidence_kind(tool_name: str, result: dict[str, Any] | None) -> EvidenceKin
         return EvidenceKind.TEST_PASS
     if tool_name in BROWSER_TOOLS and data.get("url"):
         return EvidenceKind.BROWSER_STATE
-    changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter"}
+    changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter", "code_exec"}
     if changed_files and data.get("changed") is True and not data.get("dry_run"):
         return EvidenceKind.FILE_DIFF
     return EvidenceKind.TOOL_RESULT
@@ -220,6 +220,7 @@ def _context(task: Task) -> ToolContext:
         workspace=task.workspace_path,
         allowed_effects=frozenset(effects),
         allowed_hosts=frozenset(task.allowed_hosts),
+        sandbox=task.sandbox,
     )
 
 
@@ -292,6 +293,7 @@ class Controller:
         attach: Sequence[Path] = (),
         allowed_effects: Sequence[str] = (),
         allowed_hosts: Sequence[str] = (),
+        sandbox: bool = False,
     ) -> Task:
         if not objective.strip():
             raise ValueError("the objective is empty")
@@ -331,6 +333,7 @@ class Controller:
             acceptance=[c.text for c in criteria],
             allowed_effects=sorted(set(allowed_effects)),
             allowed_hosts=hosts,
+            sandbox=sandbox,
         )
         run = _Run(task=task, ctx=_context(task), criteria=criteria)
         self._runs[task_id] = run
@@ -343,6 +346,7 @@ class Controller:
                 "acceptance": task.acceptance,
                 "allowed_effects": task.allowed_effects,
                 "allowed_hosts": task.allowed_hosts,
+                "sandbox": task.sandbox,
                 "attachments": names,
             },
         )
@@ -490,7 +494,9 @@ class Controller:
 
     def _tool_listing(self, task: Task) -> list[dict[str, Any]]:
         """The tools this task may use: network tools only if a host was allowed."""
-        return self._registry.list_for_model(network=bool(task.allowed_hosts))
+        return self._registry.list_for_model(
+            network=bool(task.allowed_hosts), sandbox=task.sandbox
+        )
 
     def cancel(self, task_id: str) -> None:
         """Ask a task to stop. A running task stops at its next model or tool call boundary."""

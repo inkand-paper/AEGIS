@@ -28,6 +28,7 @@ from aegis.model_client import ModelClient
 from aegis.models import Budget, Task, TaskState
 from aegis.providers import ProviderConfigError, build_client
 from aegis.replay import replay
+from aegis.sandbox import Sandbox, SandboxLimits, SandboxUnavailable
 from aegis.tools import default_registry
 from aegis.tools.diffing import sha256_hex
 from aegis.verifier import parse_criterion
@@ -78,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="pre-approve running the project's tests (this RUNS code the model wrote)",
     )
+    submit.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="run code inside a Docker container (no network, only the workspace mounted, "
+        "resource limits). Needs Docker and: aegis sandbox build",
+    )
     submit.add_argument("--max-model-calls", type=int, help="override the model call budget")
     submit.add_argument("--max-tool-calls", type=int, help="override the tool call budget")
     submit.add_argument(
@@ -117,6 +124,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel = commands.add_parser("cancel", help="cancel a task; a pending approval is denied")
     cancel.add_argument("task_id")
+
+    box = commands.add_parser("sandbox", help="manage the Docker sandbox")
+    box.add_argument(
+        "action",
+        choices=["check", "build", "cleanup"],
+        help="check: is it ready. build: make the image. cleanup: remove leftover containers",
+    )
     return parser
 
 
@@ -130,6 +144,8 @@ def render(snapshot: dict[str, Any]) -> str:
         f"objective:  {task['objective']}",
         f"workspace:  {task['workspace_path']}",
     ]
+    if task.get("sandbox"):
+        lines.append("sandbox:    docker (no network, workspace only)")
     plan = snapshot.get("plan")
     if plan:
         lines.append("plan:")
@@ -226,6 +242,12 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
         print(f"error: invalid budget: {exc}", file=sys.stderr)
         return USAGE_ERROR
 
+    if args.sandbox:
+        try:
+            asyncio.run(_sandbox().check())
+        except SandboxUnavailable as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return USAGE_ERROR
     controller = _controller(model, budget)
     allowed = [
         effect
@@ -239,6 +261,7 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
             attach=[Path(p) for p in args.attach],
             allowed_effects=allowed,
             allowed_hosts=args.allow_host,
+            sandbox=args.sandbox,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -248,11 +271,51 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
     return _drive(controller, task.id, controller.run(task.id))
 
 
+def _sandbox() -> Sandbox:
+    settings = get_settings()
+    return Sandbox(
+        settings.sandbox_image,
+        SandboxLimits(
+            memory_mb=settings.sandbox_memory_mb,
+            cpus=settings.sandbox_cpus,
+            pids=settings.sandbox_pids,
+            timeout_s=settings.sandbox_timeout_s,
+        ),
+    )
+
+
+def _sandbox_command(args: argparse.Namespace) -> int:
+    box = _sandbox()
+    try:
+        if args.action == "check":
+            version = asyncio.run(box.check())
+            print(f"sandbox ready: Docker {version}, image {box.image}")
+            return 0
+        if args.action == "cleanup":
+            print(f"removed {asyncio.run(box.cleanup())} leftover container(s)")
+            return 0
+        recipe = Path(__file__).resolve().parents[2] / "docker" / "sandbox.Dockerfile"
+        if not recipe.is_file():
+            print(f"error: {recipe} not found (run this from a source checkout)", file=sys.stderr)
+            return USAGE_ERROR
+        print(f"building {box.image} (this downloads python:3.13-slim the first time)...")
+        code, output = asyncio.run(
+            box.docker_call(
+                "build", "-t", box.image, "-f", str(recipe), str(recipe.parent), timeout_s=900
+            )
+        )
+        print(output[-2000:])
+        return 0 if code == 0 else 1
+    except SandboxUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+
+
 def _controller(model: ModelClient, budget: Budget | None = None) -> Controller:
     settings = get_settings()
     return Controller(
         model,
-        default_registry(),
+        default_registry(_sandbox()),
         EventLog(_events_path()),
         workspaces_dir=settings.workspaces_dir,
         default_budget=budget,
@@ -423,6 +486,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _report(args)
     if args.command == "cancel":
         return _cancel(args)
+    if args.command == "sandbox":
+        return _sandbox_command(args)
     return _status(args)
 
 

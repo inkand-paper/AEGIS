@@ -15,6 +15,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 3 | Write and edit tools, allowlisted shell, approval flow | done |
 | 4 | Durable state, crash recovery (`resume`), event-log replay | done |
 | 5 | Replanning, network allowlist, browser (Playwright) | done |
+| 6 | Docker sandbox for running code (`--sandbox`, `code_exec`) | done |
 
 ## Setup
 
@@ -155,6 +156,39 @@ screenshot, and there is NO tool that types, so the agent cannot log in or fill 
   again. If Chromium is not installed the browser tools report that, and the browser tests are
   skipped. `AEGIS_BROWSER_EXECUTABLE` can point to another Chromium.
 
+## Sandbox (Docker)
+
+`shell_run_tests` normally runs the model's code on your computer, as you. With `--sandbox` the
+code runs in a Docker container instead, and the agent also gets `code_exec`, which runs a Python
+file from the workspace in the container:
+
+```powershell
+uv run aegis sandbox build      # once: builds the image (downloads python:3.13-slim)
+uv run aegis sandbox check      # is Docker running and the image present?
+uv run aegis submit "Write fib.py that prints the first 10 Fibonacci numbers and run it" `
+    --sandbox --allow-writes --allow-exec --accept result_contains:34
+```
+
+Docker Desktop (WSL2 backend on Windows) must be running. Inside the container:
+
+- no network at all (not even DNS), so downloads, API calls and `pip install` all fail;
+- only the task workspace is visible, at `/workspace`; the rest of the file system is read-only
+  and nothing of your computer is mounted;
+- no Linux capabilities, no privilege gain, none of your environment variables (no API keys);
+- limits: 256 MB memory (no swap), 1 CPU, 64 processes, 256 open files, 50 MB per file, 30 s per
+  run (`AEGIS_SANDBOX_*` in `.env`). A run that goes over is killed and the result says why.
+
+`code_exec` only runs a file that is already in the workspace (write it with `fs_write` first),
+and it never runs on your computer: without `--sandbox` the tool is not offered. It still counts
+as "execute", so it needs `--allow-exec` or your approval. If a run is cut off by a crash,
+`aegis sandbox cleanup` removes leftover containers.
+
+What this does NOT promise: a container is defense in depth, not a guarantee. A bug in Docker or
+the kernel could let code out. The workspace is writable, so a script can fill the disk with many
+files, and it can read and change everything in the workspace, so never put secrets there.
+`--sandbox` does not make `--allow-host` browsing safer: the browser runs on your computer, not in
+the container.
+
 ## Development
 
 ```bash
@@ -177,9 +211,9 @@ What is enforced for file tools: paths are resolved inside the task workspace, `
 paths and symlinks that lead outside are refused, writes are atomic, and every call (including
 refused ones) is in the append-only event log.
 
-What is NOT isolated yet, so read this before using `--allow-exec`: `shell_run_tests` runs pytest on
-code the model wrote, as your user, on your computer. The command line is fixed, there is no shell,
+What is NOT isolated unless you pass `--sandbox`, so read this before using `--allow-exec`:
+`shell_run_tests` runs pytest on code the model wrote, as your user, on your computer. The command line is fixed, there is no shell,
 the environment is scrubbed of your API keys, output is capped and a hung run is killed. But that
 code can still read your files and use the network. Review the workspace before you approve, and do
-not run it on a machine or a folder you cannot afford to lose. A container sandbox arrives with
-Phase 6. The test and format runners use the pytest and ruff from your dev dependencies (`uv sync`).
+not run it on a machine or a folder you cannot afford to lose, or use `--sandbox`. The test and
+format runners use the pytest and ruff from your dev dependencies (`uv sync`).

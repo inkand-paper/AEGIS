@@ -56,6 +56,7 @@ class Task(BaseModel):
     # added: side-effect classes the task declared up front ("workspace", "execute")
     allowed_effects: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=list)
+    sandbox: bool = False  # code runs in a Docker container (Phase 6)
 
 
 class ToolCall(BaseModel):

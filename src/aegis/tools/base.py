@@ -47,6 +47,8 @@ class ToolContext:
     # Hosts the task may reach, as exact names or "*.example.com". Empty means no network at all.
     # Declaring a host is what lets the "external" effect run without a per-call approval.
     allowed_hosts: frozenset[str] = frozenset()
+    # True when the task was submitted with --sandbox: code runs in a container (Phase 6).
+    sandbox: bool = False
 
     def resolve(self, relative: str) -> Path:
         """Turn a workspace-relative path into a real path, or raise PolicyError.
@@ -85,6 +87,9 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
     # False for tools whose failed call will fail the same way again (a click on a button that is
     # not there). The controller then refuses an identical repeat and makes the agent change course.
     repeatable_after_failure: bool = True
+    # True for tools that only exist inside a container (code_exec). They are not offered to a
+    # task without --sandbox, and refused if called anyway.
+    requires_sandbox: bool = False
 
     def effective_side_effects(self, args: A) -> SideEffects:
         """The side effect of THIS call. Tools override it so a dry run counts as harmless."""
@@ -122,11 +127,12 @@ class ToolRegistry:
         for tool in self._tools.values():
             await tool.close_task(task_id)
 
-    def list_for_model(self, *, network: bool = True) -> list[dict[str, Any]]:
+    def list_for_model(self, *, network: bool = True, sandbox: bool = True) -> list[dict[str, Any]]:
         """The tool list in the neutral format that ModelClient.generate() accepts.
 
         `network=False` leaves out the tools that need a network, so a task that was allowed no
-        host is never offered them (and never plans around them).
+        host is never offered them (and never plans around them). `sandbox=False` does the same
+        for tools that only run inside the container.
         """
         return [
             {
@@ -135,5 +141,5 @@ class ToolRegistry:
                 "parameters": tool.arg_model.model_json_schema(),
             }
             for tool in self._tools.values()
-            if network or not tool.requires_network
+            if (network or not tool.requires_network) and (sandbox or not tool.requires_sandbox)
         ]

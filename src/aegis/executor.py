@@ -187,6 +187,11 @@ class Executor:
             return _Result(ToolOutcome.INVALID_ARGUMENTS, error=_describe_validation_error(exc))
 
         # 3. Policy
+        if tool.requires_sandbox and not ctx.sandbox:
+            return _Result(
+                ToolOutcome.POLICY_VIOLATION,
+                error=f"{tool.name} only runs in the sandbox: submit the task with --sandbox",
+            )
         if tool.requires_network and not ctx.allowed_hosts:
             return _Result(
                 ToolOutcome.POLICY_VIOLATION,

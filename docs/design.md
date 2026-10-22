@@ -644,6 +644,9 @@ This section exists so the changes are explicit and reviewable.
 15. **(Phase 5) `external` is opened per host, not per call.** `--allow-host example.com` (or `*.example.com`, optionally `:port`) lets a task use the browser on that host only. Every request the page makes goes through the allowlist, and redirects are checked hop by hop (Chromium would otherwise follow a redirect to any host by itself: a test found this). Local and private addresses are refused unless named exactly. A task with no host gets no network tools at all. Known limits: a public name made to resolve to a private address (DNS rebinding) is not caught until the Phase 6 container; and allowing a host lets the agent click anything on its pages.
 16. **(Phase 5) A browser lives for one run of a task.** After an approval pause or a `resume` the page is gone and the agent navigates again. The repeat guard is in memory too: after a `resume`, one identical repeat of an earlier failed call is allowed.
 17. **(Phase 5) A call to a tool whose failure repeats** (`repeatable_after_failure = False`, currently `browser_click`) is refused with outcome `repeat_blocked` when the identical call already failed in the same step. The refusal is still a recorded TOOL_CALL and TOOL_RESULT (P5).
+18. **(Phase 6) The sandbox is per task and opt-in** (`submit --sandbox`). With it, `shell_run_tests` runs in the container and `code_exec` becomes available. Without it, `code_exec` is not offered and is refused if called, so it can never run on the host. `shell_run_formatter` stays on the host (it runs ruff, not model code).
+19. **(Phase 6) `code_exec` has no network at all.** Section 6 lists its network as "opt-in". Docker cannot enforce a host allowlist without a proxy, so a per-host grant like `--allow-host` would be dishonest for a container. Every sandbox container runs with `--network none`. Opting in to a network for containers is not built.
+20. **(Phase 6) `code_exec` runs a workspace file, not a code string.** The file is written with `fs_write` first, so what runs is in the workspace, the event log and the diff. It reports which workspace files the run changed, and a changing run is FILE_DIFF evidence, so `tests_pass` goes stale after it. The sandbox never pulls images, containers are named and labelled (`aegis.sandbox=1`), and `aegis sandbox cleanup` removes strays after a crash. A killed worker can leave a container running until it ends by itself. Limits that are NOT enforced: total disk used by the workspace, and escapes of the kernel or runtime (section 3.3).
 
 ---
 
@@ -774,6 +777,7 @@ Anything beyond that is v0.2+.
 | 0.1 | — | Initial design doc. Supersedes the original planning note. Incorporates the review points: Phase 2 persistence, mandatory result models, deterministic verifier, explicit threat model, bounded replanning, first-class budgets, provider decision as a blocker. |
 | 0.2 | 2026-10 | Implementation notes for Phases 2 to 4: deviations 8 to 12 in section 14. No change to the contracts in sections 5 to 9. |
 | 0.3 | 2026-10 | Implementation notes for Phase 5: deviations 13 to 17 in section 14 (replanning built now, text-only browser, per-host `external`, browser lifetime, repeat guard). |
+| 0.4 | 2026-10 | Implementation notes for Phase 6: deviations 18 to 20 in section 14 (per-task `--sandbox`, no container network, `code_exec` runs files). |
 
 ---
 

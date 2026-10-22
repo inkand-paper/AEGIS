@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     workspaces_dir: Path = Path("workspaces")
     default_budget: Budget = Field(default_factory=Budget)
 
+    # --- Docker sandbox for `submit --sandbox` (Phase 6) ---
+    sandbox_image: str = "aegis-sandbox:latest"
+    sandbox_memory_mb: int = Field(default=256, ge=16)
+    sandbox_cpus: float = Field(default=1.0, gt=0)
+    sandbox_pids: int = Field(default=64, ge=8)
+    sandbox_timeout_s: float = Field(default=30.0, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:

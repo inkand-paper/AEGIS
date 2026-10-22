@@ -6,8 +6,11 @@ string) from a small, validated argument model, so the model cannot add flags or
 Be clear about what this does NOT give you: running the tests runs code the model wrote, with your
 user's permissions, and the process can still reach the network and your files. The workspace
 check covers file tools only. That is why `shell_run_tests` has the side effect "execute", which
-always needs approval unless the task was submitted with --allow-exec. Real isolation (a container)
-arrives with Phase 6.
+always needs approval unless the task was submitted with --allow-exec.
+
+For a task submitted with --sandbox, `shell_run_tests` runs inside the Docker sandbox instead
+(see aegis.sandbox): no network, only the workspace mounted, resource limits. Without --sandbox
+it still runs on the host as described above.
 """
 
 import asyncio
@@ -20,7 +23,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from aegis.tools.base import SideEffects, Tool, ToolContext, ToolError
+from aegis.sandbox import Sandbox, SandboxUnavailable
+from aegis.tools.base import SideEffects, Tool, ToolContext, ToolError, ToolUnavailable
 from aegis.tools.diffing import sha256_hex
 
 MAX_OUTPUT_CHARS = 6000
@@ -161,11 +165,30 @@ class RunTestsTool(Tool[RunTestsArgs, RunTestsResult]):
     path_fields = ("paths",)
     timeout_s = RUN_TIMEOUT_S
 
+    def __init__(self, sandbox: Sandbox | None = None) -> None:
+        self._sandbox = sandbox
+
     async def execute(self, args: RunTestsArgs, ctx: ToolContext) -> RunTestsResult:
-        argv = [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"]
+        flags = ["-q", "--no-header", "-p", "no:cacheprovider"]
         if args.keyword:
-            argv += ["-k", args.keyword]
-        argv += ["--", *args.paths]
+            flags += ["-k", args.keyword]
+        tail = ["--", *args.paths]
+        if ctx.sandbox:
+            if self._sandbox is None:
+                raise ToolUnavailable("this task wants the sandbox but none is configured")
+            try:
+                ran = await self._sandbox.run(
+                    ["python", "-m", "pytest", *flags, *tail], ctx.workspace
+                )
+            except SandboxUnavailable as exc:
+                raise ToolUnavailable(str(exc)) from None
+            note = ran.note()
+            output = f"{ran.output}\n[sandbox] {note}" if note else ran.output
+            counts = parse_pytest_summary(output)
+            return RunTestsResult(
+                exit_code=ran.exit_code, output=output, output_truncated=ran.truncated, **counts
+            )
+        argv = [sys.executable, "-m", "pytest", *flags, *tail]
         code, output, truncated = await run_program(argv, ctx.workspace)
         counts = parse_pytest_summary(output)
         return RunTestsResult(exit_code=code, output=output, output_truncated=truncated, **counts)

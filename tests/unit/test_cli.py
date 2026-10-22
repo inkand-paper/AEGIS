@@ -365,3 +365,16 @@ def test_allow_host_is_checked_and_stored(capsys: pytest.CaptureFixture[str]) ->
     assert main(["status", task_id, "--json"]) == 0
     stored = json.loads(capsys.readouterr().out)["task"]
     assert stored["allowed_hosts"] == ["a.org", "example.com"]
+
+
+def test_submit_with_sandbox_needs_a_working_docker(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aegis.sandbox import Sandbox
+
+    monkeypatch.setattr("aegis.main._sandbox", lambda: Sandbox(docker="no-such-docker-binary"))
+    code = submit("Multiply 17 by 23", "--sandbox", model=happy_model())
+    assert code == 4
+    assert "Docker is not installed" in capsys.readouterr().err
+    assert main(["sandbox", "check"]) == 4
+    assert "Docker is not installed" in capsys.readouterr().err
