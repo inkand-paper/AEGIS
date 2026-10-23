@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
+from aegis.apppolicy import normalise_apps
 from aegis.executor import Executor, observation_text
 from aegis.log import redact
 from aegis.memory import EventLog
@@ -170,6 +171,10 @@ def _evidence_kind(tool_name: str, result: dict[str, Any] | None) -> EvidenceKin
         return EvidenceKind.TEST_PASS
     if tool_name in BROWSER_TOOLS and data.get("url"):
         return EvidenceKind.BROWSER_STATE
+    if tool_name in DESKTOP_TOOLS and data.get("window"):
+        return EvidenceKind.DESKTOP_STATE
+    if tool_name == "desktop_screenshot" and data.get("sha256"):
+        return EvidenceKind.ARTIFACT_HASH
     changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter", "code_exec"}
     if changed_files and data.get("changed") is True and not data.get("dry_run"):
         return EvidenceKind.FILE_DIFF
@@ -203,6 +208,9 @@ def budget_exceeded(usage: BudgetUsage, budget: Budget) -> str | None:
 
 
 BROWSER_TOOLS = frozenset({"browser_navigate", "browser_read", "browser_click"})
+DESKTOP_TOOLS = frozenset(
+    {"desktop_windows", "desktop_inspect", "desktop_click", "desktop_type", "desktop_launch"}
+)
 
 # Outcomes that say nothing about whether the same call could work later.
 _NOT_A_REAL_FAILURE = frozenset(
@@ -213,7 +221,7 @@ _NOT_A_REAL_FAILURE = frozenset(
 def _context(task: Task) -> ToolContext:
     """What tools may know about the task. Declaring a host is what pre-approves "external"."""
     effects = set(task.allowed_effects)
-    if task.allowed_hosts:
+    if task.allowed_hosts or task.allowed_apps:
         effects.add("external")
     return ToolContext(
         task_id=task.id,
@@ -221,6 +229,7 @@ def _context(task: Task) -> ToolContext:
         allowed_effects=frozenset(effects),
         allowed_hosts=frozenset(task.allowed_hosts),
         sandbox=task.sandbox,
+        allowed_apps=frozenset(task.allowed_apps),
     )
 
 
@@ -294,6 +303,7 @@ class Controller:
         allowed_effects: Sequence[str] = (),
         allowed_hosts: Sequence[str] = (),
         sandbox: bool = False,
+        allowed_apps: Sequence[str] = (),
     ) -> Task:
         if not objective.strip():
             raise ValueError("the objective is empty")
@@ -302,6 +312,7 @@ class Controller:
             allowed = sorted(DECLARABLE_EFFECTS)
             raise ValueError(f"cannot pre-approve {sorted(unknown)}; allowed: {allowed}")
         hosts = normalise_hosts(allowed_hosts)  # raises ValueError if bad
+        apps = normalise_apps(allowed_apps)  # raises ValueError if bad
         criteria = [parse_criterion(text) for text in acceptance]  # raises ValueError if bad
         sources = [Path(item) for item in attach]
         names = [source.name for source in sources]
@@ -334,6 +345,7 @@ class Controller:
             allowed_effects=sorted(set(allowed_effects)),
             allowed_hosts=hosts,
             sandbox=sandbox,
+            allowed_apps=apps,
         )
         run = _Run(task=task, ctx=_context(task), criteria=criteria)
         self._runs[task_id] = run
@@ -347,6 +359,7 @@ class Controller:
                 "allowed_effects": task.allowed_effects,
                 "allowed_hosts": task.allowed_hosts,
                 "sandbox": task.sandbox,
+                "allowed_apps": task.allowed_apps,
                 "attachments": names,
             },
         )
@@ -495,7 +508,9 @@ class Controller:
     def _tool_listing(self, task: Task) -> list[dict[str, Any]]:
         """The tools this task may use: network tools only if a host was allowed."""
         return self._registry.list_for_model(
-            network=bool(task.allowed_hosts), sandbox=task.sandbox
+            network=bool(task.allowed_hosts),
+            sandbox=task.sandbox,
+            desktop=bool(task.allowed_apps),
         )
 
     def cancel(self, task_id: str) -> None:

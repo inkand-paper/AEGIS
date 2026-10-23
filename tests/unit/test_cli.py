@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -378,3 +379,32 @@ def test_submit_with_sandbox_needs_a_working_docker(
     assert "Docker is not installed" in capsys.readouterr().err
     assert main(["sandbox", "check"]) == 4
     assert "Docker is not installed" in capsys.readouterr().err
+
+
+def test_allow_app_is_checked_and_shown(capsys: pytest.CaptureFixture[str]) -> None:
+    assert submit("Multiply", "--allow-app", "powershell", model=happy_model()) == 4
+    assert "cannot be allowed" in capsys.readouterr().err
+    assert submit("Multiply", "--allow-app", "C:\\x\\notepad.exe", model=happy_model()) == 4
+    capsys.readouterr()
+
+    assert submit("Multiply 17 by 23", "--allow-app", "Notepad", model=happy_model()) == 0
+    out = capsys.readouterr().out
+    assert "desktop:    notepad.exe" in out
+
+
+def test_actions_prints_what_the_agent_did(capsys: pytest.CaptureFixture[str]) -> None:
+    submit("Multiply 17 by 23", model=happy_model())
+    out = capsys.readouterr().out
+    task_id = next(line for line in out.splitlines() if line.startswith("task:")).split()[1]
+    assert main(["actions", task_id]) == 0
+    printed = capsys.readouterr().out
+    assert "calculator(expression=" in printed and "-> ok" in printed
+    assert main(["actions", task_id, "--desktop"]) == 0
+    assert "(no actions recorded)" in capsys.readouterr().out
+    assert main(["actions", "nope"]) == 4
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="checks the not-Windows message")
+def test_desktop_check_says_it_needs_windows(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["desktop", "check"]) == 4
+    assert "only works on Windows" in capsys.readouterr().err

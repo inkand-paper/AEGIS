@@ -647,6 +647,10 @@ This section exists so the changes are explicit and reviewable.
 18. **(Phase 6) The sandbox is per task and opt-in** (`submit --sandbox`). With it, `shell_run_tests` runs in the container and `code_exec` becomes available. Without it, `code_exec` is not offered and is refused if called, so it can never run on the host. `shell_run_formatter` stays on the host (it runs ruff, not model code).
 19. **(Phase 6) `code_exec` has no network at all.** Section 6 lists its network as "opt-in". Docker cannot enforce a host allowlist without a proxy, so a per-host grant like `--allow-host` would be dishonest for a container. Every sandbox container runs with `--network none`. Opting in to a network for containers is not built.
 20. **(Phase 6) `code_exec` runs a workspace file, not a code string.** The file is written with `fs_write` first, so what runs is in the workspace, the event log and the diff. It reports which workspace files the run changed, and a changing run is FILE_DIFF evidence, so `tests_pass` goes stale after it. The sandbox never pulls images, containers are named and labelled (`aegis.sandbox=1`), and `aegis sandbox cleanup` removes strays after a crash. A killed worker can leave a container running until it ends by itself. Limits that are NOT enforced: total disk used by the workspace, and escapes of the kernel or runtime (section 3.3).
+21. **(Phase 7) Desktop control is per program** (`--allow-app notepad.exe`), the same shape as `--allow-host`: a task has no desktop unless programs are named, only their windows are visible, and terminals, script hosts, browsers, Explorer, installers and system tools can never be allowed.
+22. **(Phase 7) A new side-effect class, `sensitive`, exists** beside none, workspace, execute and external. A desktop click on a control whose name suggests something hard to undo (delete, send, pay, install, yes, replace, sign in ...) has this effect, it can never be pre-approved, and so always waits for a human. The check judges the control's real name, read from the program, not the name the model gave. The agent never types into password-like fields.
+23. **(Phase 7) UI Automation actions, not mouse clicks.** The backend uses accessibility patterns (invoke, toggle, select, set value) and never `click_input`, so there is no screen coordinate to get wrong. `desktop_screenshot` exists for the human and as ARTIFACT_HASH evidence, not as input to the model. Evidence is DESKTOP_STATE (`desktop_contains:<text>`). `aegis actions <task>` prints the readable action log from the event log.
+24. **(Phase 7) The Windows backend is unverified.** The design allows a documented manual check where UI automation cannot be automated; that check is `scripts/desktop_smoke.py`. All automated tests use a simulated desktop (`tests/unit/fakedesktop.py`), which proves the tools, the gates and the workflows, not pywinauto.
 
 ---
 
@@ -778,6 +782,7 @@ Anything beyond that is v0.2+.
 | 0.2 | 2026-10 | Implementation notes for Phases 2 to 4: deviations 8 to 12 in section 14. No change to the contracts in sections 5 to 9. |
 | 0.3 | 2026-10 | Implementation notes for Phase 5: deviations 13 to 17 in section 14 (replanning built now, text-only browser, per-host `external`, browser lifetime, repeat guard). |
 | 0.4 | 2026-10 | Implementation notes for Phase 6: deviations 18 to 20 in section 14 (per-task `--sandbox`, no container network, `code_exec` runs files). |
+| 0.5 | 2026-10 | Implementation notes for Phase 7: deviations 21 to 24 in section 14 (per-program desktop access, `sensitive` effect, UI Automation actions, unverified Windows backend). |
 
 ---
 

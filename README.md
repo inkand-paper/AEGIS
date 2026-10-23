@@ -16,6 +16,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 4 | Durable state, crash recovery (`resume`), event-log replay | done |
 | 5 | Replanning, network allowlist, browser (Playwright) | done |
 | 6 | Docker sandbox for running code (`--sandbox`, `code_exec`) | done |
+| 7 | Windows desktop automation (`--allow-app`, `actions` log) | built, real backend unverified |
 
 ## Setup
 
@@ -57,7 +58,7 @@ uv run aegis status <task_id>
 
 Acceptance criteria: `tool_used:<tool>`, `result_contains:<text>`, `file_read:<path>`,
 `answer_contains:<text>`, `file_written:<path>`, `tests_pass`, `page_contains:<text>`,
-`url_contains:<text>`. A task only completes if the
+`url_contains:<text>`, `desktop_contains:<text>`. A task only completes if the
 verifier finds matching tool evidence. `tests_pass` needs a `shell_run_tests` run that exited 0
 with at least one passing test, and it goes stale: if any file changed after that run, the task
 must run the tests again.
@@ -188,6 +189,45 @@ the kernel could let code out. The workspace is writable, so a script can fill t
 files, and it can read and change everything in the workspace, so never put secrets there.
 `--sandbox` does not make `--allow-host` browsing safer: the browser runs on your computer, not in
 the container.
+
+## Desktop (Windows)
+
+With `--allow-app` the agent can see and use the windows of the programs you name. Windows only,
+and it needs the screen of your computer to be unlocked while it works. A task starts with NO
+desktop access.
+
+```powershell
+uv run python scripts/desktop_smoke.py     # check the Windows backend by hand, no model needed
+uv run aegis submit "Open Notepad, type 'Meeting at noon' and save it as note.txt" `
+    --allow-app notepad.exe --accept desktop_contains:note.txt
+uv run aegis actions <task_id> --desktop   # the readable log of every desktop action
+```
+
+Tools: `desktop_windows`, `desktop_launch`, `desktop_inspect`, `desktop_click`, `desktop_type`
+and `desktop_screenshot` (saved as a PNG with its hash under `screenshots/` in the workspace).
+
+- Only windows of the allowed programs are visible. Terminals, script hosts, browsers, Explorer,
+  installers and system tools (`cmd`, `powershell`, `python`, `chrome`, `explorer`, `regedit` ...)
+  cannot be allowed at all: they would bypass the other controls. The list is best effort, so allow
+  only programs you would let a stranger use.
+- Controls are used through their accessibility actions (press, select, toggle, set text), never
+  by moving the mouse to a position, so a window covering another one cannot take a click meant for
+  something else. A control is named by id AND exact name, and a mismatch is refused.
+- Every click must say what should be true afterwards (text shown, a window title present or gone).
+  If not, the call FAILS and lists any unexpected dialog and its buttons, so the agent can
+  dismiss it or report it instead of clicking on.
+- A click on a control whose name looks sensitive (Delete, Yes, Send, Pay, Install, Replace, Sign
+  in, Run ...) ALWAYS waits for your `aegis approve`, even with `--allow-writes` and `--allow-exec`.
+  The same goes for anything you could not undo. The agent never types into password-like fields.
+- `desktop_contains:<text>` is an acceptance criterion: text a program window really showed.
+- The programs the agent starts stay open when the task ends. Close them yourself.
+- Packaged (Store) apps appear to Windows under `ApplicationFrameHost.exe`, so they cannot be
+  allowed by their own name. Use classic programs.
+- `desktop_screenshot` shows everything visible in that window, and the free-tier model cannot read
+  images anyway. It is there for you, as evidence.
+
+NOT verified yet: the Windows backend (`src/aegis/desktop_windows.py`) has only been checked on
+Linux, with a simulated desktop. The first real run is `scripts/desktop_smoke.py`.
 
 ## Development
 

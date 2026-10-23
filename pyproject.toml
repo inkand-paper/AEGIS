@@ -9,9 +9,11 @@ authors = [
 requires-python = ">=3.13.5"
 dependencies = [
     "httpx>=0.28.1",
+    "pillow>=11 ; sys_platform == 'win32'",
     "playwright>=1.64.0",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.16.0",
+    "pywinauto>=0.6.9 ; sys_platform == 'win32'",
     "rich>=15.0.0",
 ]
 
@@ -43,3 +45,7 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.17.1",
 ]
+
+[[tool.mypy.overrides]]
+module = ["pywinauto", "pywinauto.*"]
+ignore_missing_imports = true  # Windows-only dependency

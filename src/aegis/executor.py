@@ -197,6 +197,11 @@ class Executor:
                 ToolOutcome.POLICY_VIOLATION,
                 error="network tools are not allowed for this task (no host was allowed)",
             )
+        if tool.requires_desktop and not ctx.allowed_apps:
+            return _Result(
+                ToolOutcome.POLICY_VIOLATION,
+                error="desktop tools are not allowed for this task (no program was allowed)",
+            )
         for field in tool.path_fields:
             value = getattr(args, field)
             try:

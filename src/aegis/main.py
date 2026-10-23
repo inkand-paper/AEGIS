@@ -20,6 +20,7 @@ from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+from aegis.actions import render_actions
 from aegis.config import get_settings
 from aegis.controller import TERMINAL, Controller, InvalidTransition, TaskNotFound
 from aegis.log import setup_logging
@@ -80,6 +81,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="pre-approve running the project's tests (this RUNS code the model wrote)",
     )
     submit.add_argument(
+        "--allow-app",
+        action="append",
+        default=[],
+        metavar="PROGRAM",
+        help="let the task see and use the windows of this program on your desktop, for example "
+        "notepad.exe (repeatable, Windows only). The agent can press buttons and type in it",
+    )
+    submit.add_argument(
         "--sandbox",
         action="store_true",
         help="run code inside a Docker container (no network, only the workspace mounted, "
@@ -125,6 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     cancel = commands.add_parser("cancel", help="cancel a task; a pending approval is denied")
     cancel.add_argument("task_id")
 
+    actions = commands.add_parser("actions", help="the readable log of what the agent did")
+    actions.add_argument("task_id")
+    actions.add_argument("--desktop", action="store_true", help="only desktop actions")
+
+    desk = commands.add_parser("desktop", help="check desktop automation")
+    desk.add_argument("action", choices=["check"])
+
     box = commands.add_parser("sandbox", help="manage the Docker sandbox")
     box.add_argument(
         "action",
@@ -146,6 +162,8 @@ def render(snapshot: dict[str, Any]) -> str:
     ]
     if task.get("sandbox"):
         lines.append("sandbox:    docker (no network, workspace only)")
+    if task.get("allowed_apps"):
+        lines.append("desktop:    " + ", ".join(task["allowed_apps"]))
     plan = snapshot.get("plan")
     if plan:
         lines.append("plan:")
@@ -262,6 +280,7 @@ def _submit(args: argparse.Namespace, model: ModelClient | None = None) -> int:
             allowed_effects=allowed,
             allowed_hosts=args.allow_host,
             sandbox=args.sandbox,
+            allowed_apps=args.allow_app,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -311,11 +330,43 @@ def _sandbox_command(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
 
+def _desktop_backend() -> Any:
+    """The real Windows backend on Windows, nothing elsewhere (the tools then say so)."""
+    if sys.platform != "win32":
+        return None
+    from aegis.desktop_windows import WindowsDesktop
+
+    return WindowsDesktop()
+
+
+def _desktop_command(args: argparse.Namespace) -> int:
+    from aegis.desktop import DesktopUnavailable
+    from aegis.desktop_windows import WindowsDesktop
+
+    try:
+        WindowsDesktop().check()
+    except DesktopUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+    print("desktop automation is available. Try a real run: uv run python scripts/desktop_smoke.py")
+    return 0
+
+
+def _actions(args: argparse.Namespace) -> int:
+    log = EventLog(_events_path())
+    events = log.events(args.task_id)
+    if not events:
+        print(f"error: no task {args.task_id}", file=sys.stderr)
+        return USAGE_ERROR
+    print(render_actions(events, only_prefix="desktop_" if args.desktop else None))
+    return 0
+
+
 def _controller(model: ModelClient, budget: Budget | None = None) -> Controller:
     settings = get_settings()
     return Controller(
         model,
-        default_registry(_sandbox()),
+        default_registry(_sandbox(), _desktop_backend()),
         EventLog(_events_path()),
         workspaces_dir=settings.workspaces_dir,
         default_budget=budget,
@@ -488,6 +539,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cancel(args)
     if args.command == "sandbox":
         return _sandbox_command(args)
+    if args.command == "actions":
+        return _actions(args)
+    if args.command == "desktop":
+        return _desktop_command(args)
     return _status(args)
 
 

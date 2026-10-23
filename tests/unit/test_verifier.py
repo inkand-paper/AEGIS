@@ -210,3 +210,11 @@ def test_browser_criteria_need_a_value() -> None:
     for text in ("page_contains", "url_contains:"):
         with pytest.raises(ValueError, match="needs a value"):
             parse_criterion(text)
+
+
+def test_desktop_contains_needs_text_a_program_window_really_showed() -> None:
+    shown = page("x", "Saved note.txt", kind=EvidenceKind.DESKTOP_STATE)
+    assert not failed_names(verify(["desktop_contains:SAVED"], evidence=[CALC, shown]))
+    assert failed_names(verify(["desktop_contains:Saved"], answer="Saved!"))
+    browser_only = page("http://h/", "Saved", kind=EvidenceKind.BROWSER_STATE)
+    assert failed_names(verify(["desktop_contains:Saved"], evidence=[CALC, browser_only]))

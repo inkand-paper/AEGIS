@@ -12,7 +12,9 @@ from pydantic import BaseModel
 #   workspace  creates or changes files inside the task workspace
 #   execute    runs a program on this computer (for example the project's tests)
 #   external   touches anything outside the workspace
-SideEffects = Literal["none", "workspace", "execute", "external"]
+#   sensitive  hard to undo or agreeing to something (for example deleting, sending, paying).
+#              It can never be pre-approved: it always waits for a human.
+SideEffects = Literal["none", "workspace", "execute", "external", "sensitive"]
 
 
 class PolicyError(Exception):
@@ -49,6 +51,8 @@ class ToolContext:
     allowed_hosts: frozenset[str] = frozenset()
     # True when the task was submitted with --sandbox: code runs in a container (Phase 6).
     sandbox: bool = False
+    # Desktop programs the task may drive, as executable names such as "notepad.exe".
+    allowed_apps: frozenset[str] = frozenset()
 
     def resolve(self, relative: str) -> Path:
         """Turn a workspace-relative path into a real path, or raise PolicyError.
@@ -90,6 +94,8 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
     # True for tools that only exist inside a container (code_exec). They are not offered to a
     # task without --sandbox, and refused if called anyway.
     requires_sandbox: bool = False
+    # True for desktop tools. They are only offered to tasks that allowed a program.
+    requires_desktop: bool = False
 
     def effective_side_effects(self, args: A) -> SideEffects:
         """The side effect of THIS call. Tools override it so a dry run counts as harmless."""
@@ -127,7 +133,9 @@ class ToolRegistry:
         for tool in self._tools.values():
             await tool.close_task(task_id)
 
-    def list_for_model(self, *, network: bool = True, sandbox: bool = True) -> list[dict[str, Any]]:
+    def list_for_model(
+        self, *, network: bool = True, sandbox: bool = True, desktop: bool = True
+    ) -> list[dict[str, Any]]:
         """The tool list in the neutral format that ModelClient.generate() accepts.
 
         `network=False` leaves out the tools that need a network, so a task that was allowed no
@@ -141,5 +149,7 @@ class ToolRegistry:
                 "parameters": tool.arg_model.model_json_schema(),
             }
             for tool in self._tools.values()
-            if (network or not tool.requires_network) and (sandbox or not tool.requires_sandbox)
+            if (network or not tool.requires_network)
+            and (sandbox or not tool.requires_sandbox)
+            and (desktop or not tool.requires_desktop)
         ]

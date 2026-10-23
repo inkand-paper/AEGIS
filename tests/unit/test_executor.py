@@ -354,7 +354,7 @@ def test_every_tool_call_has_exactly_one_tool_result(events: EventLog, ctx: Tool
 
 
 def test_registry_lists_tools_in_the_neutral_model_format() -> None:
-    listing = default_registry().list_for_model(network=False, sandbox=False)
+    listing = default_registry().list_for_model(network=False, sandbox=False, desktop=False)
     assert {tool["name"] for tool in listing} == {
         "calculator",
         "fs_list",
@@ -381,6 +381,20 @@ def test_sandbox_tools_are_only_listed_for_sandboxed_tasks() -> None:
     plain = {t["name"] for t in registry.list_for_model(sandbox=False)}
     boxed = {t["name"] for t in registry.list_for_model(sandbox=True)}
     assert boxed - plain == {"code_exec"}
+
+
+def test_desktop_tools_are_only_listed_for_tasks_that_allowed_a_program() -> None:
+    registry = default_registry()
+    plain = {t["name"] for t in registry.list_for_model(desktop=False)}
+    desk = {t["name"] for t in registry.list_for_model(desktop=True)}
+    assert {n for n in desk - plain} == {
+        "desktop_windows",
+        "desktop_launch",
+        "desktop_inspect",
+        "desktop_click",
+        "desktop_type",
+        "desktop_screenshot",
+    }
 
 
 def test_registering_a_name_twice_fails() -> None:

@@ -57,6 +57,7 @@ class Task(BaseModel):
     allowed_effects: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=list)
     sandbox: bool = False  # code runs in a Docker container (Phase 6)
+    allowed_apps: list[str] = Field(default_factory=list)  # desktop programs (Phase 7)
 
 
 class ToolCall(BaseModel):
@@ -200,6 +201,7 @@ class EvidenceKind(StrEnum):
     FILE_DIFF = "file_diff"
     ARTIFACT_HASH = "artifact_hash"
     BROWSER_STATE = "browser_state"
+    DESKTOP_STATE = "desktop_state"
     HUMAN_APPROVAL = "human_approval"
     COMMAND_EXIT_ZERO = "command_exit_zero"
     TOOL_RESULT = "tool_result"  # added: a tool really returned this (Phase 2 evidence)

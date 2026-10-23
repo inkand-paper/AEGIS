@@ -14,6 +14,8 @@ Acceptance criteria are plain strings given with `--accept`:
     page_contains:Thanks        a page the browser really showed contained this text (any
                                 page it opened, read or clicked through; case-insensitive)
     url_contains:/done          the browser's LAST page had this in its URL (the end state)
+    desktop_contains:Saved      a program window the desktop tools really read contained this text
+                                (any window they opened, inspected or clicked in; case-insensitive)
 
 Staleness rule (section 9.1): a passing test run only counts if no workspace file changed after
 it. "I ran the tests, then edited a file, then claimed success" fails here.
@@ -28,7 +30,7 @@ from typing import Any
 
 from aegis.models import Evidence, EvidenceKind, Plan, StepStatus, VerificationResult
 
-VERIFIER_VERSION = "0.3"
+VERIFIER_VERSION = "0.4"
 
 
 class CriterionKind(StrEnum):
@@ -40,6 +42,7 @@ class CriterionKind(StrEnum):
     TESTS_PASS = "tests_pass"
     PAGE_CONTAINS = "page_contains"
     URL_CONTAINS = "url_contains"
+    DESKTOP_CONTAINS = "desktop_contains"
 
 
 NO_ARGUMENT = frozenset({CriterionKind.TESTS_PASS})
@@ -195,6 +198,13 @@ class Verifier:
                 e
                 for e in evidence
                 if e.kind is EvidenceKind.BROWSER_STATE
+                and argument.lower() in str((e.payload.get("result") or {}).get("text", "")).lower()
+            ]
+        elif criterion.kind is CriterionKind.DESKTOP_CONTAINS:
+            matches = [
+                e
+                for e in evidence
+                if e.kind is EvidenceKind.DESKTOP_STATE
                 and argument.lower() in str((e.payload.get("result") or {}).get("text", "")).lower()
             ]
         elif criterion.kind is CriterionKind.URL_CONTAINS:
