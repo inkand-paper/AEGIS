@@ -16,6 +16,8 @@ Acceptance criteria are plain strings given with `--accept`:
     url_contains:/done          the browser's LAST page had this in its URL (the end state)
     desktop_contains:Saved      a program window the desktop tools really read contained this text
                                 (any window they opened, inspected or clicked in; case-insensitive)
+    image_saved:art/logo.png    image_generate saved that file, AND the file on disk right now is
+                                still a well-formed image with exactly the recorded SHA-256
 
 Staleness rule (section 9.1): a passing test run only counts if no workspace file changed after
 it. "I ran the tests, then edited a file, then claimed success" fails here.
@@ -26,11 +28,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
+from aegis.images import ImageError, inspect_image
 from aegis.models import Evidence, EvidenceKind, Plan, StepStatus, VerificationResult
 
-VERIFIER_VERSION = "0.4"
+VERIFIER_VERSION = "0.5"
 
 
 class CriterionKind(StrEnum):
@@ -43,6 +47,7 @@ class CriterionKind(StrEnum):
     PAGE_CONTAINS = "page_contains"
     URL_CONTAINS = "url_contains"
     DESKTOP_CONTAINS = "desktop_contains"
+    IMAGE_SAVED = "image_saved"
 
 
 NO_ARGUMENT = frozenset({CriterionKind.TESTS_PASS})
@@ -102,6 +107,7 @@ class Verifier:
         criteria: list[Criterion],
         final_answer: str | None,
         unmatched_tool_calls: int,
+        workspace: Path | None = None,
     ) -> VerificationResult:
         # Every piece of evidence the controller records comes from a successful tool call.
         tool_evidence = [e for e in evidence if e.kind is not EvidenceKind.HUMAN_APPROVAL]
@@ -134,7 +140,9 @@ class Verifier:
                 [e.id for e in tool_evidence][:10],
             )
         )
-        checks.extend(self._check_criterion(c, tool_evidence, final_answer) for c in criteria)
+        checks.extend(
+            self._check_criterion(c, tool_evidence, final_answer, workspace) for c in criteria
+        )
 
         return VerificationResult(
             id=uuid.uuid4().hex,
@@ -167,8 +175,46 @@ class Verifier:
             )
         return _check(name, False, "no test run with exit code 0 and at least one passing test")
 
+    @staticmethod
+    def _check_image_saved(
+        name: str, argument: str, evidence: list[Evidence], workspace: Path | None
+    ) -> dict[str, Any]:
+        """The recorded hash must match the file as it is NOW (P3: evidence, not memory)."""
+        wanted = _normalize_path(argument)
+        saved = [
+            e
+            for e in evidence
+            if e.kind is EvidenceKind.ARTIFACT_HASH
+            and e.payload.get("tool_name") == "image_generate"
+            and _normalize_path(str((e.payload.get("result") or {}).get("path", ""))) == wanted
+        ]
+        if not saved:
+            return _check(name, False, "image_generate never saved that file")
+        latest = saved[-1]  # the last save of this path is the one that counts
+        ids = [latest.id]
+        if workspace is None:
+            return _check(name, False, "no workspace to check the file in", ids)
+        root = workspace.resolve()
+        target = (root / wanted).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return _check(name, False, "the file is not in the workspace any more", ids)
+        try:
+            info = inspect_image(target.read_bytes())
+        except (ImageError, OSError) as exc:
+            return _check(name, False, f"the file on disk is not a valid image: {exc}", ids)
+        recorded = (latest.payload.get("result") or {}).get("sha256")
+        if info.sha256 != recorded:
+            return _check(name, False, "the file changed after image_generate saved it", ids)
+        return _check(
+            name, True, f"{info.format} {info.width}x{info.height}, sha256 {info.sha256[:12]}", ids
+        )
+
     def _check_criterion(
-        self, criterion: Criterion, evidence: list[Evidence], final_answer: str | None
+        self,
+        criterion: Criterion,
+        evidence: list[Evidence],
+        final_answer: str | None,
+        workspace: Path | None = None,
     ) -> dict[str, Any]:
         name = f"criterion:{criterion.text}"
         argument = criterion.argument
@@ -183,6 +229,9 @@ class Verifier:
 
         if criterion.kind is CriterionKind.TESTS_PASS:
             return self._check_tests_pass(name, evidence)
+
+        if criterion.kind is CriterionKind.IMAGE_SAVED:
+            return self._check_image_saved(name, argument, evidence, workspace)
 
         if criterion.kind is CriterionKind.FILE_WRITTEN:
             wanted = _normalize_path(argument)

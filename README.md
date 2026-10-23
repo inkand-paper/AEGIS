@@ -17,6 +17,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 5 | Replanning, network allowlist, browser (Playwright) | done |
 | 6 | Docker sandbox for running code (`--sandbox`, `code_exec`) | done |
 | 7 | Windows desktop automation (`--allow-app`, `actions` log) | built, real backend unverified |
+| 8 | Image generation (`image_generate`, `image_saved` check) | built, hosted provider unverified |
 
 ## Setup
 
@@ -58,7 +59,7 @@ uv run aegis status <task_id>
 
 Acceptance criteria: `tool_used:<tool>`, `result_contains:<text>`, `file_read:<path>`,
 `answer_contains:<text>`, `file_written:<path>`, `tests_pass`, `page_contains:<text>`,
-`url_contains:<text>`, `desktop_contains:<text>`. A task only completes if the
+`url_contains:<text>`, `desktop_contains:<text>`, `image_saved:<path>`. A task only completes if the
 verifier finds matching tool evidence. `tests_pass` needs a `shell_run_tests` run that exited 0
 with at least one passing test, and it goes stale: if any file changed after that run, the task
 must run the tests again.
@@ -228,6 +229,42 @@ and `desktop_screenshot` (saved as a PNG with its hash under `screenshots/` in t
 
 NOT verified yet: the Windows backend (`src/aegis/desktop_windows.py`) has only been checked on
 Linux, with a simulated desktop. The first real run is `scripts/desktop_smoke.py`.
+
+## Images
+
+`image_generate` makes one picture from a prompt and saves it in the task workspace. Which service
+makes it is a setting, not code (`.env`):
+
+```powershell
+# default: offline test provider. No network, no account, no cost.
+uv run aegis submit "Make a 256x256 cover image called cover.png" --allow-writes `
+    --accept image_saved:cover.png
+
+# a hosted provider (needs your own key; the task must also name the host)
+#   AEGIS_IMAGE_PROVIDER=openai          (or custom, with AEGIS_IMAGE_BASE_URL and AEGIS_IMAGE_MODEL)
+#   AEGIS_IMAGE_API_KEY=...
+uv run aegis submit "Draw a lighthouse at dusk, lighthouse.png" --allow-host api.openai.com `
+    --accept image_saved:lighthouse.png
+```
+
+- The default provider (`procedural`) draws a deterministic ABSTRACT picture from the prompt. It
+  does not show what the prompt says. It exists so the pipeline can be run and tested for free,
+  and the tool tells the model so, so a report should not claim the image depicts anything.
+- Hosted providers speak the OpenAI `/images/generations` protocol and must return the picture
+  inline (base64). A reply that only holds a URL is refused, so no second host is ever contacted.
+  A hosted call is `external`: it needs `--allow-host <the provider host>` (which also pre-approves
+  it), and your prompt is sent to that service. One attempt only, never a silent retry, because a
+  generation can cost money.
+- The bytes are inspected before anything is saved: PNG (every chunk checksum), JPEG, GIF and
+  WebP must be well formed, at most 4096 per side, 16 million pixels and 10 MB. The file name must
+  match the real format. An existing file is only replaced with `overwrite`.
+- `image_saved:<path>` passes only if the file on disk RIGHT NOW is still a valid image with the
+  SHA-256 recorded when it was made. Replace or damage it afterwards and the task fails.
+- The check is structural. It proves the file is a real image of the stated size and unchanged.
+  It cannot tell whether the picture is any good or matches the prompt.
+
+NOT verified yet: the hosted provider (`OpenAIImagesProvider`) is tested against a simulated
+server only. The first real call needs your key.
 
 ## Development
 

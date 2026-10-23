@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     workspaces_dir: Path = Path("workspaces")
     default_budget: Budget = Field(default_factory=Budget)
 
+    # --- image generation (Phase 8) ---
+    image_provider: str = "procedural"  # procedural (offline test provider) | openai | custom
+    image_api_key: SecretStr | None = None
+    image_base_url: str | None = None
+    image_model: str | None = None
+
     # --- Docker sandbox for `submit --sandbox` (Phase 6) ---
     sandbox_image: str = "aegis-sandbox:latest"
     sandbox_memory_mb: int = Field(default=256, ge=16)

@@ -651,6 +651,10 @@ This section exists so the changes are explicit and reviewable.
 22. **(Phase 7) A new side-effect class, `sensitive`, exists** beside none, workspace, execute and external. A desktop click on a control whose name suggests something hard to undo (delete, send, pay, install, yes, replace, sign in ...) has this effect, it can never be pre-approved, and so always waits for a human. The check judges the control's real name, read from the program, not the name the model gave. The agent never types into password-like fields.
 23. **(Phase 7) UI Automation actions, not mouse clicks.** The backend uses accessibility patterns (invoke, toggle, select, set value) and never `click_input`, so there is no screen coordinate to get wrong. `desktop_screenshot` exists for the human and as ARTIFACT_HASH evidence, not as input to the model. Evidence is DESKTOP_STATE (`desktop_contains:<text>`). `aegis actions <task>` prints the readable action log from the event log.
 24. **(Phase 7) The Windows backend is unverified.** The design allows a documented manual check where UI automation cannot be automated; that check is `scripts/desktop_smoke.py`. All automated tests use a simulated desktop (`tests/unit/fakedesktop.py`), which proves the tools, the gates and the workflows, not pywinauto.
+25. **(Phase 8) The image interface is a Protocol; the default provider is offline and does not depict the prompt.** `ImageProvider` hides the service behind a setting (`AEGIS_IMAGE_PROVIDER`). `procedural` makes a deterministic abstract PNG so the pipeline is testable with no account, and the tool description and every result carry `depicts_prompt: false` so the agent cannot honestly claim otherwise. A hosted provider speaks the OpenAI images protocol, must answer with inline base64, is `external` (so `--allow-host` names it and pre-approves it), and is never retried.
+26. **(Phase 8) Image bytes are inspected, not trusted.** `inspect_image` parses PNG (all chunk CRCs, exact end), JPEG, GIF and WebP with the standard library only, with size, pixel and byte caps and a check that the file name matches the real format. Writes are atomic. Evidence is ARTIFACT_HASH.
+27. **(Phase 8) `image_saved:<path>` re-reads the file at verification time.** Evidence says what was written; the verifier checks that the file on disk now is still a valid image with the recorded SHA-256 (P3). It is deliberately structural: whether a picture is good or matches the prompt is not machine-checkable here and is left to the human, per section 9.2.
+28. **(Phase 8) The hosted provider is unverified.** Tests use a simulated server (`httpx.MockTransport`). The end-to-end exit test (research + code + image -> verified report) runs on the offline provider.
 
 ---
 
@@ -783,6 +787,7 @@ Anything beyond that is v0.2+.
 | 0.3 | 2026-10 | Implementation notes for Phase 5: deviations 13 to 17 in section 14 (replanning built now, text-only browser, per-host `external`, browser lifetime, repeat guard). |
 | 0.4 | 2026-10 | Implementation notes for Phase 6: deviations 18 to 20 in section 14 (per-task `--sandbox`, no container network, `code_exec` runs files). |
 | 0.5 | 2026-10 | Implementation notes for Phase 7: deviations 21 to 24 in section 14 (per-program desktop access, `sensitive` effect, UI Automation actions, unverified Windows backend). |
+| 0.6 | 2026-10 | Implementation notes for Phase 8: deviations 25 to 28 in section 14 (image provider interface and offline default, inspected bytes, `image_saved` re-check, unverified hosted provider). |
 
 ---
 

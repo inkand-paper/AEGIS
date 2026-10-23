@@ -360,6 +360,7 @@ def test_registry_lists_tools_in_the_neutral_model_format() -> None:
         "fs_list",
         "fs_read",
         "fs_write",
+        "image_generate",
         "fs_edit",
         "shell_run_tests",
         "shell_run_formatter",

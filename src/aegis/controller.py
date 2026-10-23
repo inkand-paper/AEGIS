@@ -173,7 +173,7 @@ def _evidence_kind(tool_name: str, result: dict[str, Any] | None) -> EvidenceKin
         return EvidenceKind.BROWSER_STATE
     if tool_name in DESKTOP_TOOLS and data.get("window"):
         return EvidenceKind.DESKTOP_STATE
-    if tool_name == "desktop_screenshot" and data.get("sha256"):
+    if tool_name in {"desktop_screenshot", "image_generate"} and data.get("sha256"):
         return EvidenceKind.ARTIFACT_HASH
     changed_files = tool_name in {"fs_write", "fs_edit", "shell_run_formatter", "code_exec"}
     if changed_files and data.get("changed") is True and not data.get("dry_run"):
@@ -605,6 +605,7 @@ class Controller:
             criteria=run.criteria,
             final_answer=run.final_answer,
             unmatched_tool_calls=len(self._events.unmatched_tool_calls(task.id)),
+            workspace=task.workspace_path,
         )
         run.verification = result
         self._events.append(

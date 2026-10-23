@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 from aegis.actions import render_actions
 from aegis.config import get_settings
 from aegis.controller import TERMINAL, Controller, InvalidTransition, TaskNotFound
+from aegis.images import ImageProvider, build_image_provider
 from aegis.log import setup_logging
 from aegis.memory import EventLog, LeaseHeld
 from aegis.model_client import ModelClient
@@ -330,6 +331,17 @@ def _sandbox_command(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
 
+def _image_provider() -> ImageProvider:
+    settings = get_settings()
+    key = settings.image_api_key.get_secret_value() if settings.image_api_key else None
+    return build_image_provider(
+        settings.image_provider,
+        api_key=key,
+        base_url=settings.image_base_url,
+        model=settings.image_model,
+    )
+
+
 def _desktop_backend() -> Any:
     """The real Windows backend on Windows, nothing elsewhere (the tools then say so)."""
     if sys.platform != "win32":
@@ -366,7 +378,7 @@ def _controller(model: ModelClient, budget: Budget | None = None) -> Controller:
     settings = get_settings()
     return Controller(
         model,
-        default_registry(_sandbox(), _desktop_backend()),
+        default_registry(_sandbox(), _desktop_backend(), _image_provider()),
         EventLog(_events_path()),
         workspaces_dir=settings.workspaces_dir,
         default_budget=budget,
