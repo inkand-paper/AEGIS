@@ -160,7 +160,8 @@ def suite_path(location: Path) -> Path:
 
 
 def suite_digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Normalise CRLF → LF so the hash is identical on Windows and Linux.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def load_suite(location: Path) -> tuple[Suite, str]:

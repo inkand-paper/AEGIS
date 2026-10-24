@@ -136,7 +136,7 @@ def build_run_args(
         "--ulimit", f"nofile={limits.open_files}:{limits.open_files}",
         "--ulimit", f"fsize={limits.max_file_mb * 1024 * 1024}",
         "--user", user or container_user(),
-        "--volume", f"{workspace}:{CONTAINER_WORKDIR}:rw",
+        "--volume", f"{workspace.as_posix()}:{CONTAINER_WORKDIR}:rw",
         "--workdir", CONTAINER_WORKDIR,
         "--env", "HOME=/tmp",
         "--env", f"PYTHONPATH={CONTAINER_WORKDIR}",
