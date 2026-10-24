@@ -11,6 +11,14 @@ def _row(label: str, value: object) -> str:
     return f"  {label:<26}{value}"
 
 
+def why(task: dict[str, Any]) -> str:
+    """The most useful one-line reason a task did not succeed. A run that never finished says
+    why it stopped; only a finished run is explained by what the oracle found missing."""
+    if task["state"] != "completed" and task.get("error"):
+        return str(task["error"])
+    return "; ".join(task["oracle_failures"]) or str(task.get("error") or "")
+
+
 def render_metrics(metrics: dict[str, Any]) -> list[str]:
     cats = metrics["by_category"]
     lines = [
@@ -46,6 +54,9 @@ def render(report: dict[str, Any]) -> str:
         "",
         *render_metrics(report["metrics"]),
     ]
+    if report.get("complete") is False:
+        ran, planned = len(report["tasks"]), len(report.get("selected", report["tasks"]))
+        lines.insert(3, f"INCOMPLETE: {ran} of {planned} tasks have run (use --resume to continue)")
     gap = report.get("holdout_gap")
     if gap:
         lines.append(
@@ -55,8 +66,7 @@ def render(report: dict[str, Any]) -> str:
     if failed:
         lines += ["", "not successful:"]
         for t in failed:
-            why = "; ".join(t["oracle_failures"]) or t["error"] or ""
-            lines.append(f"  {t['id']:<28}{t['state']:<22}{why[:100]}")
+            lines.append(f"  {t['id']:<28}{t['state']:<22}{why(t)[:100]}")
     return "\n".join(lines)
 
 

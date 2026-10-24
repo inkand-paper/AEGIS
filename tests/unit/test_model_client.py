@@ -11,6 +11,7 @@ from aegis.model_client import (
     AnthropicClient,
     Message,
     ModelResponseError,
+    ModelToolCallError,
     ModelTransportError,
     OpenAICompatClient,
     RateLimiter,
@@ -145,6 +146,37 @@ def test_auth_errors_fail_fast_without_retry() -> None:
         run(client)
     assert len(calls) == 1
     assert info.value.status_code == 401
+
+
+def test_a_tool_call_the_provider_could_not_parse_is_its_own_error_and_not_retried() -> None:
+    """Live Groq run: HTTP 400 tool_use_failed when the model wrote broken JSON for fs_write."""
+    calls: list[int] = []
+    body = {
+        "error": {
+            "message": "Failed to parse tool call arguments as JSON",
+            "type": "invalid_request_error",
+            "code": "tool_use_failed",
+            "failed_generation": '{"name": "fs_write", "arguments": {"path": "a.py", "content": "x',
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(400, json=body)
+
+    client, sleeps = make_client(handler)
+    with pytest.raises(ModelToolCallError) as info:
+        run(client)
+    assert len(calls) == 1 and sleeps == []  # asking again with the same input would not help
+    assert info.value.status_code == 400 and info.value.attempts == 1
+    assert "sk-test-secret-value" not in str(info.value)
+
+
+def test_other_bad_requests_are_still_plain_transport_errors() -> None:
+    client, _ = make_client(lambda r: httpx.Response(400, json={"error": {"code": "other"}}))
+    with pytest.raises(ModelTransportError) as info:
+        run(client)
+    assert not isinstance(info.value, ModelToolCallError)
 
 
 def test_long_retry_after_fails_fast() -> None:

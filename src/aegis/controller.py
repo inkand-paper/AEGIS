@@ -29,6 +29,7 @@ from aegis.model_client import (
     ModelClient,
     ModelClientError,
     ModelResponse,
+    ModelToolCallError,
     ModelTransportError,
     RawToolCall,
     record_usage,
@@ -255,6 +256,13 @@ class _Run:
     base_wall_s: float = 0.0
     replans: int = 0  # how many times the plan was revised (counted from PLAN_REVISED events)
     failed_calls: set[str] = field(default_factory=set)  # calls that failed in this process
+
+
+BAD_TOOL_CALL_FEEDBACK = (
+    "Your last tool call was rejected before it ran: its arguments were not valid JSON. Call the "
+    "tool again. Put any file content in ONE JSON string, escape every double quote as \\\" and "
+    "every newline as \\n, and keep the content short."
+)
 
 
 class Controller:
@@ -725,7 +733,13 @@ class Controller:
             if queued:
                 calls, queued = queued, []
             else:
-                response = await self._ask(run, messages, tools, self._max_output_tokens)
+                try:
+                    response = await self._ask(run, messages, tools, self._max_output_tokens)
+                except ModelToolCallError:
+                    # The provider refused the model's own tool call (invalid JSON). Nothing ran.
+                    # Tell the model and let it try again; max_turns_per_step bounds the retries.
+                    messages.append(Message(role="user", content=BAD_TOOL_CALL_FEEDBACK))
+                    continue
                 calls = response.tool_calls
                 if calls:
                     messages.append(

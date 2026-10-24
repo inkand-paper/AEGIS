@@ -9,6 +9,7 @@ import contextlib
 import http.server
 import json
 import logging
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -148,7 +149,9 @@ async def run_task(
     approve: bool = True,
 ) -> TaskResult:
     root = run_dir / task.id
-    root.mkdir(parents=True, exist_ok=True)
+    if root.exists():  # an earlier, unfinished attempt of this task: start clean
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
     events = EventLog(root / "aegis.db")
     started = datetime.now(UTC)
     result = TaskResult(
@@ -242,6 +245,49 @@ def environment(suite: Suite, digest: str, model_label: str) -> dict[str, Any]:
     }
 
 
+def new_run_dir(out_dir: Path) -> Path:
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
+    path = out_dir / run_id
+    path.mkdir(parents=True)
+    return path
+
+
+class ResumeMismatch(Exception):
+    """The run being continued was made with another suite file or another model."""
+
+
+def _report(
+    run_dir: Path,
+    suite: Suite,
+    digest: str,
+    model_label: str,
+    approve: bool,
+    selected: list[str],
+    results: list[TaskResult],
+    *,
+    complete: bool,
+) -> dict[str, Any]:
+    return {
+        "run_id": run_dir.name,
+        "complete": complete,
+        "selected": selected,
+        "written_at": datetime.now(UTC).isoformat(),
+        "environment": environment(suite, digest, model_label),
+        "approve_policy": "auto" if approve else "deny",
+        "metrics": compute(results),
+        "holdout_gap": holdout_gap(results),
+        "tasks": [r.to_json() for r in results],
+    }
+
+
+def _save(run_dir: Path, report: dict[str, Any]) -> None:
+    """Write through a temporary file so a kill never leaves a half-written results.json."""
+    target = run_dir / "results.json"
+    temporary = run_dir / "results.json.tmp"
+    temporary.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    temporary.replace(target)
+
+
 async def run_suite(
     suite: Suite,
     tasks: list[BenchTask],
@@ -252,28 +298,42 @@ async def run_suite(
     model_label: str,
     approve: bool = True,
     progress: Callable[[TaskResult], None] | None = None,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Run tasks one after another and write `results.json` into a new directory."""
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-    run_dir = out_dir / run_id
-    run_dir.mkdir(parents=True)
+    """Run tasks one after another. `results.json` is rewritten after EVERY task, so a Ctrl+C,
+    a daily rate limit or a crash keeps everything that finished. Pass an existing `run_dir`
+    to continue it: tasks already in its results.json are skipped."""
     results: list[TaskResult] = []
+    if run_dir is None:
+        run_dir = new_run_dir(out_dir)
+    elif (run_dir / "results.json").is_file():
+        previous = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+        env = previous["environment"]
+        if env["suite_sha256"] != digest or env["model"] != model_label:
+            raise ResumeMismatch(
+                "that run used a different suite file or model, so its results cannot be mixed "
+                "with new ones"
+            )
+        results = [TaskResult(**row) for row in previous["tasks"]]
+    selected = [t.id for t in tasks]
+    done = {r.id for r in results}
     for task in tasks:
+        if task.id in done:
+            continue
         result = await run_task(task, model_factory, run_dir, approve=approve)
         results.append(result)
+        _save(
+            run_dir,
+            _report(
+                run_dir, suite, digest, model_label, approve, selected, results, complete=False
+            ),
+        )
         if progress:
             progress(result)
-    report = {
-        "run_id": run_id,
-        "finished_at": datetime.now(UTC).isoformat(),
-        "environment": environment(suite, digest, model_label),
-        "approve_policy": "auto" if approve else "deny",
-        "metrics": compute(results),
-        "holdout_gap": holdout_gap(results),
-        "tasks": [r.to_json() for r in results],
-    }
-    (run_dir / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report = _report(run_dir, suite, digest, model_label, approve, selected, results, complete=True)
+    _save(run_dir, report)
     report["results_path"] = str(run_dir / "results.json")
+    report["run_dir"] = str(run_dir)
     return report
 
 

@@ -17,7 +17,7 @@ from aegis.controller import (
     apply_transition,
 )
 from aegis.memory import EventLog
-from aegis.model_client import ModelTransportError
+from aegis.model_client import ModelToolCallError, ModelTransportError
 from aegis.models import Budget, BudgetUsage, EventType, Task, TaskState
 from aegis.tools import default_registry
 from aegis.tools.base import Tool, ToolContext, ToolError, ToolRegistry
@@ -570,3 +570,49 @@ def test_every_task_gets_its_own_workspace_inside_the_workspaces_folder(
     assert first.workspace_path.is_relative_to(root)
     assert second.workspace_path.is_relative_to(root)
     assert first.workspace_path.is_dir()
+
+
+def test_a_rejected_tool_call_is_fed_back_and_the_step_goes_on(
+    tmp_path: Path, events: EventLog
+) -> None:
+    """Live Groq run: HTTP 400 tool_use_failed killed the whole task. Now the model gets told."""
+    model = ScriptedModel(
+        say(plan_json("Write the file")),
+        ModelToolCallError("HTTP 400: tool_use_failed", status_code=400, attempts=1),
+        call_tools(("fs_write", {"path": "a.txt", "content": "hi\n"})),
+        say("wrote a.txt"),
+    )
+    controller = make(tmp_path, events, model)
+    task = controller.create_task(
+        "Write a.txt", acceptance=["file_written:a.txt"], allowed_effects=["workspace"]
+    )
+    finished = run(controller, task.id)
+    assert finished.state is TaskState.COMPLETED
+    assert (task.workspace_path / "a.txt").read_text(encoding="utf-8") == "hi\n"
+    retry_prompt = model.calls[2]  # the call right after the rejection
+    assert retry_prompt[-1].role == "user" and "not valid JSON" in retry_prompt[-1].content
+    assert finished.usage.model_calls == 4  # the rejected call still counts
+
+
+def test_a_model_that_keeps_breaking_its_tool_calls_still_ends(
+    tmp_path: Path, events: EventLog
+) -> None:
+    broken = ModelToolCallError("HTTP 400: tool_use_failed", status_code=400, attempts=1)
+    model = ScriptedModel(say(plan_json("Write the file")), *[broken] * 40)
+    controller = make(tmp_path, events, model, max_turns_per_step=3, max_step_attempts=1)
+    task = controller.create_task("Write a.txt", budget=NO_REPLAN, allowed_effects=["workspace"])
+    finished = run(controller, task.id)
+    assert finished.state is TaskState.FAILED  # bounded by max_turns_per_step, no endless loop
+    assert finished.usage.model_calls == 4  # the plan + exactly three tries
+
+
+def test_a_provider_error_that_is_not_a_tool_call_problem_still_fails_at_once(
+    tmp_path: Path, events: EventLog
+) -> None:
+    model = ScriptedModel(
+        say(plan_json("Do it")), ModelTransportError("HTTP 401: bad key", status_code=401)
+    )
+    controller = make(tmp_path, events, model)
+    task = controller.create_task("Do it")
+    finished = run(controller, task.id)
+    assert finished.state is TaskState.FAILED and "401" in (finished.last_error or "")

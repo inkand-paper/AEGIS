@@ -38,9 +38,13 @@ Rules:
 - Plan only what the objective asks for. Do NOT add steps that write, edit or run anything
   (files, tests, formatters) unless the objective says to. Reporting a result is done in the
   final answer, not by saving it to a file.
-- Only plan steps the tools below can really do. If part of the objective needs something no
-  tool can do (for example building an executable, installing software, or using the internet),
-  do not pretend: make the last step report plainly what could not be done and why.
+- You can read, parse, count, sort, filter and reformat text and data yourself, and do small
+  arithmetic. A missing "CSV tool" or "sorting tool" is NOT a reason to give up: read the file
+  with a tool, then do the work and write the result with a tool.
+- Only plan steps the tools below can really do. A missing OUTSIDE capability is the limit: for
+  example building an executable, installing software, running a program no tool can run, or
+  using a website no tool can open. For that part, do not pretend: make the last step report
+  plainly what could not be done and why.
 - The last step must produce the final answer to the objective.
 - depends_on lists the 1-based numbers of steps that must finish first. Leave it out to run
   the step after the previous one.
@@ -58,8 +62,10 @@ already done stay done and are not repeated. Reply with ONLY a JSON object, no o
 Rules:
 - 1 to 10 steps. Each step is one concrete action that can be done with the tools below.
 - Do NOT repeat the approach that failed. Choose a different way, or a smaller piece of work.
-- Only plan what the tools below can really do. If the objective cannot be met with them, make
-  the single remaining step report plainly what could not be done and why. Do not pretend.
+- Only plan what the tools below can really do. You can parse, count, sort and reformat data
+  yourself, so a missing "CSV tool" is not a limit. Only if the objective needs an outside
+  capability no tool offers, make the single remaining step report plainly what could not be done
+  and why. Do not pretend.
 - The last step must produce the final answer to the objective.
 - depends_on lists the 1-based numbers of the steps in THIS list that must finish first. Leave
   it out to run the step after the previous one.

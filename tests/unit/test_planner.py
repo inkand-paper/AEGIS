@@ -98,3 +98,12 @@ def test_the_agent_prompt_forbids_inventing_results() -> None:
     from aegis.controller import AGENT_SYSTEM_PROMPT
 
     assert "Never claim to have done what you did not do" in AGENT_SYSTEM_PROMPT
+
+
+def test_both_prompts_say_the_model_can_parse_and_count_data_itself() -> None:
+    """Live run: the plan said 'cannot compute the sum, there is no tool to parse CSV'."""
+    from aegis.planner import PLAN_SYSTEM_PROMPT, REVISE_SYSTEM_PROMPT
+
+    for prompt in (PLAN_SYSTEM_PROMPT, REVISE_SYSTEM_PROMPT):
+        assert 'a missing "CSV tool"' in prompt or 'missing "CSV tool"' in prompt
+    assert "OUTSIDE capability" in PLAN_SYSTEM_PROMPT

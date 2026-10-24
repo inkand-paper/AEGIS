@@ -10,7 +10,7 @@ from typing import Any
 from aegis.bench import report as reporting
 from aegis.bench.metrics import TaskResult
 from aegis.bench.oracle import grade
-from aegis.bench.runner import prepare_workspace, run_suite
+from aegis.bench.runner import ResumeMismatch, new_run_dir, prepare_workspace, run_suite
 from aegis.bench.spec import (
     Suite,
     freeze,
@@ -53,6 +53,13 @@ def add_parser(commands: Any) -> None:
     selection(run)
     run.add_argument("--out", type=Path, default=None, help="default: data/bench")
     run.add_argument("--deny-approvals", action="store_true", help="do not approve; leave waiting")
+    run.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        metavar="RUN_DIR",
+        help="continue an earlier run directory: finished tasks are kept, the rest are run",
+    )
     run.add_argument("--allow-unfrozen", action="store_true", help="run a suite that is not frozen")
     show = sub.add_parser("show", help="print a results.json")
     show.add_argument("results", type=Path)
@@ -166,20 +173,35 @@ def _run(
 
     def progress(r: TaskResult) -> None:
         mark = "ok  " if r.success else "FAIL"
-        print(f"{mark} {r.id:<26}{r.state:<22}{r.model_calls} model calls", file=sys.stderr)
+        line = f"{mark} {r.id:<26}{r.state:<22}{r.model_calls} model calls"
+        if not r.success:
+            line += "  " + reporting.why(r.to_json())[:120]
+        print(line, file=sys.stderr)
 
-    results = asyncio.run(
-        run_suite(
-            suite,
-            tasks,
-            lambda _task: client,
-            out,
-            digest=digest,
-            model_label=label,
-            approve=not args.deny_approvals,
-            progress=progress,
+    run_dir = args.resume or new_run_dir(out)
+    print(f"run directory: {run_dir}", file=sys.stderr)
+    try:
+        results = asyncio.run(
+            run_suite(
+                suite,
+                tasks,
+                lambda _task: client,
+                out,
+                digest=digest,
+                model_label=label,
+                approve=not args.deny_approvals,
+                progress=progress,
+                run_dir=run_dir,
+            )
         )
-    )
+    except ResumeMismatch as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+    except KeyboardInterrupt:
+        print("\ninterrupted. What finished is saved. Continue with:", file=sys.stderr)
+        print(f"  aegis bench run {args.suite} --resume {run_dir}", file=sys.stderr)
+        print(f"  (results so far: {run_dir / 'results.json'})", file=sys.stderr)
+        return 3
     print()
     print(reporting.render(results))
     print(f"\nresults: {results['results_path']}")

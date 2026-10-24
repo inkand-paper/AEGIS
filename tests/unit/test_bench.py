@@ -680,3 +680,137 @@ def test_export_and_grade_let_another_agent_be_measured_the_same_way(
     assert "1/1 passed" in capsys.readouterr().out
     write_suite(tmp_path / "s", task_dict(id="a", objective="Other."))
     assert main(["bench", "grade", str(suite), str(export)]) == 4  # a different suite file
+
+
+# ---------------------------------------------------------------- long runs: save, stop, continue
+
+
+def mini_suite(*ids: str) -> Suite:
+    return Suite.model_validate(
+        {"name": "mini", "version": "1", "tasks": [task_dict(id=i) for i in ids]}
+    )
+
+
+def ctrl_c(_messages: Any) -> Any:
+    raise KeyboardInterrupt
+
+
+class InterruptingFactory:
+    """Gives every task a working script, except one that hits Ctrl+C."""
+
+    def __init__(self, stop_at: str | None) -> None:
+        self.stop_at = stop_at
+        self.built: list[str] = []
+
+    def __call__(self, task: BenchTask) -> Any:
+        self.built.append(task.id)
+        if task.id == self.stop_at:
+            return ScriptedModel(say(plan_json("x")), ctrl_c)
+        return solve()
+
+
+def test_results_are_saved_after_every_task(tmp_path: Path) -> None:
+    suite = mini_suite("a", "b")
+    snapshots: list[dict[str, Any]] = []
+
+    def watch(_r: TaskResult) -> None:
+        run_dir = next(tmp_path.iterdir())
+        snapshots.append(json.loads((run_dir / "results.json").read_text(encoding="utf-8")))
+
+    asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks, lambda _t: solve(), tmp_path, digest="d", model_label="m",
+            progress=watch,
+        )
+    )  # fmt: skip
+    assert [len(s["tasks"]) for s in snapshots] == [1, 2]
+    assert snapshots[0]["complete"] is False and snapshots[0]["selected"] == ["a", "b"]
+    final = json.loads(next(tmp_path.iterdir()).joinpath("results.json").read_text())
+    assert (
+        final["complete"] is True and not (next(tmp_path.iterdir()) / "results.json.tmp").exists()
+    )
+
+
+def test_ctrl_c_keeps_what_finished_and_the_run_can_be_continued(tmp_path: Path) -> None:
+    suite = mini_suite("a", "b", "c")
+    first = InterruptingFactory(stop_at="b")
+    run_dir = runner.new_run_dir(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            runner.run_suite(
+                suite, suite.tasks, first, tmp_path, digest="d", model_label="m", run_dir=run_dir
+            )
+        )
+    saved = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+    assert [t["id"] for t in saved["tasks"]] == ["a"] and saved["complete"] is False
+    assert "INCOMPLETE: 1 of 3" in reporting.render(saved)
+
+    second = InterruptingFactory(stop_at=None)
+    done = asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks, second, tmp_path, digest="d", model_label="m", run_dir=run_dir
+        )
+    )
+    assert second.built == ["b", "c"]  # a was NOT run again
+    assert [t["id"] for t in done["tasks"]] == ["a", "b", "c"] and done["complete"] is True
+    assert done["metrics"]["succeeded"] == 3
+
+
+def test_a_run_cannot_be_continued_with_another_suite_or_model(tmp_path: Path) -> None:
+    suite = mini_suite("a", "b")
+    run_dir = runner.new_run_dir(tmp_path)
+    asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks[:1], lambda _t: solve(), tmp_path, digest="d1", model_label="m1",
+            run_dir=run_dir,
+        )
+    )  # fmt: skip
+    for digest, label in (("d2", "m1"), ("d1", "m2")):
+        with pytest.raises(runner.ResumeMismatch):
+            asyncio.run(
+                runner.run_suite(
+                    suite, suite.tasks, lambda _t: solve(), tmp_path, digest=digest,
+                    model_label=label, run_dir=run_dir,
+                )
+            )  # fmt: skip
+
+
+def test_an_unfinished_earlier_attempt_of_a_task_is_discarded(tmp_path: Path) -> None:
+    stale = tmp_path / "t-one"
+    stale.mkdir()
+    (stale / "left-over.txt").write_text("old", encoding="utf-8")
+    go(make_task(), solve(), tmp_path)
+    assert not (tmp_path / "t-one" / "left-over.txt").exists()
+
+
+def test_the_reason_shown_for_a_failure_is_the_real_one() -> None:
+    died = result(
+        state="failed", oracle_passed=False, error="ModelError: HTTP 400: tool_use_failed"
+    )
+    died.oracle_failures = ["file_equals: total.txt: missing"]  # true, but not the cause
+    assert "tool_use_failed" in reporting.why(died.to_json())
+    wrong = result(oracle_passed=False)  # said completed, content wrong: the oracle is the reason
+    wrong.oracle_failures = ["file_equals: total.txt: content differs"]
+    assert "content differs" in reporting.why(wrong.to_json())
+
+
+def test_the_run_command_reports_ctrl_c_and_how_to_continue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = write_suite(tmp_path / "s", task_dict(id="a"), task_dict(id="b"))
+    main(["bench", "freeze", str(suite)])
+    # one shared client serves every task, so script both tasks into one model
+    shared = ScriptedModel(
+        say(plan_json("Write the file")),
+        call_tools(("fs_write", {"path": "out.txt", "content": "5\n"})),
+        say("done"),
+        say(plan_json("x")),
+        ctrl_c,
+    )
+    monkeypatch.setattr(bench_cli, "build_client", lambda _s: shared)
+    out = tmp_path / "out"
+    code = main(["bench", "run", str(suite), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 3 and "--resume" in err and "interrupted" in err
+    saved = json.loads(next(out.glob("*/results.json")).read_text(encoding="utf-8"))
+    assert [t["id"] for t in saved["tasks"]] == ["a"]

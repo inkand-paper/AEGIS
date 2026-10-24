@@ -81,6 +81,16 @@ uv run aegis bench show data/bench/<run>/results.json
 uv run aegis bench compare data/bench/<runA>/results.json data/bench/<runB>/results.json
 ```
 
+A long run is safe to stop. `results.json` is rewritten after every task, so Ctrl+C, a daily
+rate limit or a crash keeps everything that finished. The command prints how to continue:
+
+```powershell
+uv run aegis bench run bench/suites/v1 --resume data\bench\<run directory>
+```
+
+Finished tasks are kept and only the rest are run. A run can only be continued with the same
+suite file and the same model. `bench show` marks an unfinished run as INCOMPLETE.
+
 Each task runs in its own directory under `data/bench/<run>/<task>/` with its own event log, so
 your normal `data/aegis.db` is not touched. Tasks run one after another. On the free Groq tier
 (8000 tokens per minute) the client waits out rate limits, so expect the whole suite to take a
