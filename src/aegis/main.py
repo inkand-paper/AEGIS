@@ -6,6 +6,8 @@
     aegis approve <task_id>        review the pending call, and if you agree, carry on
     aegis cancel <task_id>         stop a task (this also denies a pending approval)
     aegis resume <task_id>         carry on a task whose process died
+    aegis bench run <suite>        run the benchmark (also: list, validate, freeze, show,
+                                   compare, export, grade)
     aegis report <task_id>         final report and the files the task produced
                                    (--replay also checks the event log for consistency)
 
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from aegis.actions import render_actions
+from aegis.bench import cli as bench_cli
 from aegis.config import get_settings
 from aegis.controller import TERMINAL, Controller, InvalidTransition, TaskNotFound
 from aegis.images import ImageProvider, build_image_provider
@@ -148,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["check", "build", "cleanup"],
         help="check: is it ready. build: make the image. cleanup: remove leftover containers",
     )
+    bench_cli.add_parser(commands)
     return parser
 
 
@@ -555,6 +559,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _actions(args)
     if args.command == "desktop":
         return _desktop_command(args)
+    if args.command == "bench":
+        return bench_cli.command(args)
     return _status(args)
 
 

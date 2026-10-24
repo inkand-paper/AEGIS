@@ -18,6 +18,7 @@ The full design, safety model and phase plan are in [docs/design.md](docs/design
 | 6 | Docker sandbox for running code (`--sandbox`, `code_exec`) | done |
 | 7 | Windows desktop automation (`--allow-app`, `actions` log) | built, real backend unverified |
 | 8 | Image generation (`image_generate`, `image_saved` check) | built, hosted provider unverified |
+| 9 | Benchmark harness: 33 tasks, independent oracle, six metrics (`aegis bench`) | built, not yet run with a real model |
 
 ## Setup
 
@@ -265,6 +266,23 @@ uv run aegis submit "Draw a lighthouse at dusk, lighthouse.png" --allow-host api
 
 NOT verified yet: the hosted provider (`OpenAIImagesProvider`) is tested against a simulated
 server only. The first real call needs your key.
+
+## Benchmark
+
+`aegis bench` measures AEGIS against a frozen suite of 33 tasks (13 held out) with an oracle that
+is independent of the agent's own verifier. Full description: [docs/benchmark.md](docs/benchmark.md).
+
+```powershell
+uv run aegis bench validate bench/suites/v1             # prove the tasks are fair (no model needed)
+uv run aegis bench run bench/suites/v1 --only fm-sum-csv
+uv run aegis bench run bench/suites/v1                  # the dev split; slow on a free tier
+uv run aegis bench show data/bench/<run>/results.json
+```
+
+It reports task success, verification pass rate (false completion claims), recovery rate,
+interventions, tokens and dollars per success, and safety violations. NOT done yet: a run with a
+real model, and the baseline comparison with another agent (`bench export` and `bench grade`
+prepare it).
 
 ## Development
 

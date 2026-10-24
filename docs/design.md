@@ -655,6 +655,11 @@ This section exists so the changes are explicit and reviewable.
 26. **(Phase 8) Image bytes are inspected, not trusted.** `inspect_image` parses PNG (all chunk CRCs, exact end), JPEG, GIF and WebP with the standard library only, with size, pixel and byte caps and a check that the file name matches the real format. Writes are atomic. Evidence is ARTIFACT_HASH.
 27. **(Phase 8) `image_saved:<path>` re-reads the file at verification time.** Evidence says what was written; the verifier checks that the file on disk now is still a valid image with the recorded SHA-256 (P3). It is deliberately structural: whether a picture is good or matches the prompt is not machine-checkable here and is left to the human, per section 9.2.
 28. **(Phase 8) The hosted provider is unverified.** Tests use a simulated server (`httpx.MockTransport`). The end-to-end exit test (research + code + image -> verified report) runs on the offline provider.
+29. **(Phase 9) The benchmark oracle is separate from the verifier.** Each task carries checks the harness runs itself (hidden tests on a copy of the workspace, exact content, a canary outside the workspace). "Verification pass rate" is therefore measurable: of the tasks marked completed, how many also pass the oracle. Without a second opinion the metric would only restate the verifier.
+30. **(Phase 9) The suite is drafted by Claude and proven fair by `bench validate`.** Per D4 you curate it. Each task has a reference solution; validation requires the reference to pass the oracle and the untouched setup to fail it. "Write tests" tasks are graded by mutation: the agent's tests must fail on deliberately broken code. The suite is frozen by SHA-256 and a run refuses a changed or unfrozen suite.
+31. **(Phase 9) Interruption is simulated at a model-call boundary.** A fresh controller resumes from the event log. Mid-tool crashes stay covered by the real SIGKILL integration test, not by benchmark tasks.
+32. **(Phase 9) "Safety violations" counts crossed boundaries, not refusals.** The oracle finds real breaches (a canary outside the workspace changed). Dispatcher refusals are reported as `policy_rejections`, because a refusal cannot tell an attack from a model mistake.
+33. **(Phase 9) The baseline comparison against another agent is not done.** `bench export` and `bench grade` make a like-for-like grading possible, but running another agent needs it installed on your machine. Holdout tasks are hidden from the agent, not from the developer.
 
 ---
 
@@ -788,6 +793,7 @@ Anything beyond that is v0.2+.
 | 0.4 | 2026-10 | Implementation notes for Phase 6: deviations 18 to 20 in section 14 (per-task `--sandbox`, no container network, `code_exec` runs files). |
 | 0.5 | 2026-10 | Implementation notes for Phase 7: deviations 21 to 24 in section 14 (per-program desktop access, `sensitive` effect, UI Automation actions, unverified Windows backend). |
 | 0.6 | 2026-10 | Implementation notes for Phase 8: deviations 25 to 28 in section 14 (image provider interface and offline default, inspected bytes, `image_saved` re-check, unverified hosted provider). |
+| 0.7 | 2026-10 | Implementation notes for Phase 9: deviations 29 to 33 in section 14 (independent oracle, validated and frozen suite, simulated interruption, safety-violation definition, baseline comparison not done). |
 
 ---
 

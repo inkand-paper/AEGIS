@@ -49,3 +49,6 @@ dev = [
 [[tool.mypy.overrides]]
 module = ["pywinauto", "pywinauto.*"]
 ignore_missing_imports = true  # Windows-only dependency
+
+[tool.ruff.lint.per-file-ignores]
+"bench/*" = ["E501"]  # the suite builder holds long string literals on purpose
