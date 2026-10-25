@@ -23,8 +23,10 @@ def main(path: str) -> int:
                 continue
             failed += 1
             name = f"{case.get('classname', '')}::{case.get('name', '')}"
-            detail = (node.get("message") or "") + "\n" + (node.text or "")
-            print(f"::error title={escape(name)[:200]}::{escape(detail.strip()[:1500])}")
+            body = (node.text or "").strip()
+            # The END of a traceback names the failing line; the start only repeats the test.
+            detail = (node.get("message") or "")[:300] + "\n...\n" + body[-1100:]
+            print(f"::error title={escape(name)[:200]}::{escape(detail.strip())}")
     print(f"{failed} failing test(s) annotated")
     return 0
 

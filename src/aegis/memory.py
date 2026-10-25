@@ -83,20 +83,45 @@ def _row_to_event(row: sqlite3.Row) -> Event:
     )
 
 
+OPEN_ATTEMPTS = 6
+OPEN_RETRY_DELAY_S = 0.25
+
+
 class EventLog:
     def __init__(self, path: Path | str = ":memory:") -> None:
         self._path = str(path)
         if self._path != ":memory:":
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        if self._path != ":memory:":
-            # WAL lets `aegis status` read while a task is writing. FULL makes every committed
-            # event survive a power cut, which is what "record before side effects" needs.
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA synchronous = FULL")
+        self._conn = self._open()
         self._migrate()
+
+    def _open(self) -> sqlite3.Connection:
+        """Open the database. Right after a process was killed, Windows can briefly refuse the
+        leftover WAL files ("disk I/O error"), and that is exactly when `resume` opens it, so a
+        few short retries are part of crash recovery. Any other error is raised at once."""
+        last: sqlite3.OperationalError | None = None
+        for attempt in range(OPEN_ATTEMPTS):
+            if attempt:
+                time.sleep(OPEN_RETRY_DELAY_S)
+            conn: sqlite3.Connection | None = None
+            try:
+                conn = sqlite3.connect(self._path)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout = 5000")
+                if self._path != ":memory:":
+                    # WAL lets `aegis status` read while a task is writing. FULL makes every
+                    # committed event survive a power cut ("record before side effects").
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA synchronous = FULL")
+                return conn
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    conn.close()
+                if "disk i/o error" not in str(exc).lower():
+                    raise
+                last = exc
+        assert last is not None
+        raise last
 
     def close(self) -> None:
         self._conn.close()

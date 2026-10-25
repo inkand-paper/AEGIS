@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -77,3 +78,72 @@ def test_usage_is_recomputed_from_events_alone() -> None:
     assert usage.tool_calls == 1
     assert usage.tokens_total == 100
     assert str(usage.dollars) == "0.10"
+
+
+def test_opening_retries_a_transient_windows_disk_io_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI on Windows: reopening the log right after a kill raised 'disk I/O error'."""
+    import sqlite3
+
+    real_connect = sqlite3.connect
+    attempts: list[int] = []
+
+    class Flaky:
+        def __init__(self, path: str) -> None:
+            self._conn = real_connect(path)
+            attempts.append(1)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._conn, name)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == "_conn":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._conn, name, value)
+
+        def execute(self, sql: str, *args: Any) -> Any:
+            if "journal_mode" in sql and len(attempts) < 3:
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._conn.execute(sql, *args)
+
+    monkeypatch.setattr("aegis.memory.sqlite3.connect", Flaky)
+    monkeypatch.setattr("aegis.memory.OPEN_RETRY_DELAY_S", 0)
+    log = EventLog(tmp_path / "a.db")
+    assert len(attempts) == 3 and log.schema_version() > 0
+
+
+def test_a_persistent_disk_error_is_raised_after_the_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    calls: list[int] = []
+
+    def always_fails(path: str) -> Any:
+        calls.append(1)
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("aegis.memory.sqlite3.connect", always_fails)
+    monkeypatch.setattr("aegis.memory.OPEN_RETRY_DELAY_S", 0)
+    with pytest.raises(sqlite3.OperationalError):
+        EventLog(tmp_path / "a.db")
+    assert len(calls) == 6
+
+
+def test_other_database_errors_are_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    calls: list[int] = []
+
+    def broken(path: str) -> Any:
+        calls.append(1)
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr("aegis.memory.sqlite3.connect", broken)
+    with pytest.raises(sqlite3.OperationalError):
+        EventLog(tmp_path / "a.db")
+    assert calls == [1]
