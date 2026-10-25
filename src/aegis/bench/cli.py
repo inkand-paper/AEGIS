@@ -205,6 +205,21 @@ def _run(
     print()
     print(reporting.render(results))
     print(f"\nresults: {results['results_path']}")
+    if results.get("stopped"):
+        print(
+            "\nThe provider stopped serving requests (a rate or daily token limit). What",
+            file=sys.stderr,
+        )
+        print(
+            "finished is saved and the unfinished tasks are NOT counted as failures.",
+            file=sys.stderr,
+        )
+        print(
+            "Wait for the limit to reset, then continue:\n"
+            f"  aegis bench run {args.suite} --resume {run_dir}",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 

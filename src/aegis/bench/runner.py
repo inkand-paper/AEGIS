@@ -21,7 +21,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from aegis.bench.metrics import TaskResult, compute, holdout_gap
+from aegis.bench.metrics import TaskResult, compute, holdout_gap, provider_failure
 from aegis.bench.oracle import grade
 from aegis.bench.spec import BenchTask, Suite
 from aegis.controller import Controller
@@ -266,10 +266,12 @@ def _report(
     results: list[TaskResult],
     *,
     complete: bool,
+    stopped: str | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_dir.name,
         "complete": complete,
+        "stopped": stopped,
         "selected": selected,
         "written_at": datetime.now(UTC).isoformat(),
         "environment": environment(suite, digest, model_label),
@@ -314,13 +316,27 @@ async def run_suite(
                 "that run used a different suite file or model, so its results cannot be mixed "
                 "with new ones"
             )
-        results = [TaskResult(**row) for row in previous["tasks"]]
+        # A task the provider refused to serve was never really attempted: run it again.
+        results = [
+            r for r in (TaskResult(**row) for row in previous["tasks"]) if not provider_failure(r)
+        ]
     selected = [t.id for t in tasks]
     done = {r.id for r in results}
     for task in tasks:
         if task.id in done:
             continue
         result = await run_task(task, model_factory, run_dir, approve=approve)
+        if provider_failure(result):
+            # Every later task would hit the same wall. Stop, keep what finished, and say why.
+            stopped = f"{task.id}: {(result.error or '')[:300]}"
+            report = _report(
+                run_dir, suite, digest, model_label, approve, selected, results,
+                complete=False, stopped=stopped,
+            )  # fmt: skip
+            _save(run_dir, report)
+            report["results_path"] = str(run_dir / "results.json")
+            report["run_dir"] = str(run_dir)
+            return report
         results.append(result)
         _save(
             run_dir,

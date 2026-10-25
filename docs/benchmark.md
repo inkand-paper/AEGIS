@@ -163,3 +163,13 @@ success falsely. When writing the comparison, state that, and include the tasks 
   (4/5 on the dev file_manipulation tasks). The instruction, the document and the oracle now all
   say: whole word, lowercase only. This was an oracle defect, not a tuning of the task to the
   agent; results from 1.0 and 1.1 are not comparable (`bench compare` warns on a hash change).
+
+## When the provider stops serving requests
+
+A free tier has a daily token cap. When the model provider answers with a rate limit or an
+outage that will not clear in seconds, the task did not fail: it never ran. `bench run` now
+stops at that task, keeps everything that finished, prints the exact `--resume` command, and
+exits with code 3. Such tasks are reported as `not_run_provider_limit` and are left out of every
+rate, so a daily limit can no longer look like a 55% success rate. `--resume` also re-runs any
+task an older results file recorded that way. A bad request (HTTP 400) or a malformed tool call
+is the model's own doing and still counts as a failure.

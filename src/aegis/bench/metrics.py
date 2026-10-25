@@ -46,7 +46,24 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return None if denominator == 0 else round(numerator / denominator, 4)
 
 
+# A bad request (HTTP 400) or a malformed tool call is the model's doing and is scored.
+PROVIDER_LIMIT_MARKS = ("rate limited", "HTTP 429", "HTTP 5", "gave up after")
+
+
+def provider_failure(result: TaskResult) -> bool:
+    """The model provider stopped answering (a rate or daily limit, an outage). That says nothing
+    about the agent, so such a task is not scored: it is re-run on `--resume`."""
+    error = result.error or ""
+    return (
+        not result.completed
+        and error.startswith("ModelError")
+        and any(mark in error for mark in PROVIDER_LIMIT_MARKS)
+    )
+
+
 def compute(results: list[TaskResult]) -> dict[str, Any]:
+    not_run = sum(1 for r in results if provider_failure(r))
+    results = [r for r in results if not provider_failure(r)]
     attempted = len(results)
     successes = [r for r in results if r.success]
     claims = [r for r in results if r.completed]
@@ -60,6 +77,7 @@ def compute(results: list[TaskResult]) -> dict[str, Any]:
         row["attempted"] += 1
         row["succeeded"] += int(r.success)
     return {
+        "not_run_provider_limit": not_run,
         "attempted": attempted,
         "succeeded": len(successes),
         "task_success_rate": _ratio(len(successes), attempted),

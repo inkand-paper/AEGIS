@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from aegis.bench import cli as bench_cli
 from aegis.bench import report as reporting
 from aegis.bench import runner
-from aegis.bench.metrics import TaskResult, compute, holdout_gap
+from aegis.bench.metrics import TaskResult, compute, holdout_gap, provider_failure
 from aegis.bench.oracle import _clean_env, grade
 from aegis.bench.runner import SimulatedInterrupt, run_task, serve_site
 from aegis.bench.spec import (
@@ -814,3 +814,73 @@ def test_the_run_command_reports_ctrl_c_and_how_to_continue(
     assert code == 3 and "--resume" in err and "interrupted" in err
     saved = json.loads(next(out.glob("*/results.json")).read_text(encoding="utf-8"))
     assert [t["id"] for t in saved["tasks"]] == ["a"]
+
+
+# ------------------------------------------------ a provider limit is not an agent failure
+
+
+def test_only_provider_limits_are_excused_from_the_score() -> None:
+    limited = result(
+        state="failed", oracle_passed=False, error="ModelError: rate limited; wait 305s"
+    )
+    down = result(state="failed", oracle_passed=False, error="ModelError: gave up after 3 attempts")
+    bad = result(state="failed", oracle_passed=False, error="ModelError: HTTP 400: tool_use_failed")
+    wrong = result(state="failed", oracle_passed=False, error="BudgetExceeded: model_calls 60/60")
+    assert provider_failure(limited) and provider_failure(down)
+    assert not provider_failure(bad) and not provider_failure(wrong)
+    assert not provider_failure(result())
+    metrics = compute([result(), limited, down, bad, wrong])
+    assert metrics["attempted"] == 3 and metrics["succeeded"] == 1
+    assert metrics["not_run_provider_limit"] == 2
+
+
+def _limited_client() -> Any:
+    from aegis.model_client import ModelTransportError
+
+    class Limited:
+        async def generate(self, *_a: Any, **_k: Any) -> Any:
+            raise ModelTransportError("rate limited; provider asks to wait 305s. HTTP 429: x")
+
+    return Limited()
+
+
+def test_a_suite_stops_at_a_provider_limit_and_resume_runs_the_rest(tmp_path: Path) -> None:
+    suite = Suite.model_validate(
+        {"name": "s", "version": "1", "tasks": [task_dict(id="a"), task_dict(id="b")]}
+    )
+    first = asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks, lambda _t: _limited_client(), tmp_path, digest="d", model_label="m"
+        )
+    )
+    assert first["complete"] is False and first["tasks"] == []  # nothing was scored
+    assert first["stopped"].startswith("a:")
+    run_dir = Path(first["run_dir"])
+    assert not (run_dir / "b").exists()  # it stopped instead of failing every later task
+
+    second = asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks, lambda _t: solve(), tmp_path, digest="d", model_label="m",
+            run_dir=run_dir,
+        )
+    )  # fmt: skip
+    assert second["complete"] is True and second["stopped"] is None
+    assert [t["id"] for t in second["tasks"]] == ["a", "b"]
+
+
+def test_resume_reruns_tasks_an_older_run_recorded_as_provider_failures(tmp_path: Path) -> None:
+    suite = Suite.model_validate({"name": "s", "version": "1", "tasks": [task_dict(id="a")]})
+    run_dir = tmp_path / "r"
+    run_dir.mkdir()
+    old = result(id="a", state="failed", oracle_passed=False, error="ModelError: rate limited; x")
+    (run_dir / "results.json").write_text(
+        json.dumps({"environment": {"suite_sha256": "d", "model": "m"}, "tasks": [old.to_json()]}),
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        runner.run_suite(
+            suite, suite.tasks, lambda _t: solve(), tmp_path, digest="d", model_label="m",
+            run_dir=run_dir,
+        )
+    )  # fmt: skip
+    assert report["metrics"]["succeeded"] == 1 and report["metrics"]["not_run_provider_limit"] == 0

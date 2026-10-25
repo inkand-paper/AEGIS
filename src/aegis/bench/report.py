@@ -57,6 +57,10 @@ def render(report: dict[str, Any]) -> str:
     if report.get("complete") is False:
         ran, planned = len(report["tasks"]), len(report.get("selected", report["tasks"]))
         lines.insert(3, f"INCOMPLETE: {ran} of {planned} tasks have run (use --resume to continue)")
+        if report.get("stopped"):
+            lines.insert(
+                4, f"STOPPED: the model provider stopped serving requests: {report['stopped']}"
+            )
     gap = report.get("holdout_gap")
     if gap:
         lines.append(
