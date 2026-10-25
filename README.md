@@ -1,5 +1,7 @@
 # AEGIS
 
+[![CI](https://github.com/inkand-paper/AEGIS/actions/workflows/ci.yml/badge.svg)](https://github.com/inkand-paper/AEGIS/actions/workflows/ci.yml)
+
 A long-running AI agent. You describe an outcome, AEGIS plans it, does the work through a
 validated tool dispatcher, checks the work against evidence, and reports what actually happened.
 

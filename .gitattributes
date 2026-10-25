@@ -1,0 +1,3 @@
+# The benchmark suite is frozen by the SHA-256 of its bytes, so it must not change line endings
+# between Linux and Windows checkouts.
+bench/suites/** text eol=lf
