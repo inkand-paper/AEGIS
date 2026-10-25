@@ -202,6 +202,111 @@ def test_short_retry_after_is_honoured() -> None:
     assert sleeps == [2.0]
 
 
+# ---------------------------------------------------------------- paced waits (free-tier limits)
+
+
+def tpm_429(wait: str = "1.5s") -> httpx.Response:
+    body = {
+        "error": {
+            "message": f"Rate limit reached on tokens per minute. Please try again in {wait}."
+        }
+    }
+    return httpx.Response(429, json=body)
+
+
+def test_a_rate_limit_that_names_its_wait_does_not_use_up_attempts() -> None:
+    responses = [tpm_429() for _ in range(5)] + [httpx.Response(200, json=ok_body())]
+    client, sleeps = make_client(lambda request: responses.pop(0))
+    response = run(client)
+    assert sleeps == [1.5] * 5  # waited exactly as asked, five times, and still succeeded
+    assert response.usage.attempts == 6  # every HTTP call is still counted against the budget
+
+
+def test_paced_waits_and_real_failures_are_counted_separately() -> None:
+    responses = [
+        tpm_429(),
+        tpm_429(),
+        httpx.Response(503, text="busy"),
+        httpx.Response(503, text="busy"),
+        httpx.Response(200, json=ok_body()),
+    ]
+    client, _ = make_client(lambda request: responses.pop(0))
+    run(client)  # two failures (< 3 attempts) plus two paced waits: succeeds
+
+
+def test_a_third_real_failure_still_ends_the_call_after_paced_waits() -> None:
+    responses = [tpm_429()] + [httpx.Response(503, text="busy") for _ in range(3)]
+    client, _ = make_client(lambda request: responses.pop(0))
+    with pytest.raises(ModelTransportError) as info:
+        run(client)
+    assert info.value.attempts == 4 and not responses
+
+
+def test_paced_waits_are_bounded_in_number() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return tpm_429("1s")
+
+    client, sleeps = make_client(handler)
+    with pytest.raises(ModelTransportError):
+        run(client)
+    assert len(sleeps) == 8 + 2  # 8 paced waits, then the normal backoff between 3 failures
+    assert len(calls) == 8 + 3
+
+
+def test_paced_waits_are_bounded_in_total_time() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return tpm_429("20s")
+
+    client, sleeps = make_client(handler, max_paced_total_s=50)
+    with pytest.raises(ModelTransportError):
+        run(client)
+    assert sleeps[:2] == [20.0, 20.0]  # a third 20 s would pass the 50 s allowance
+    assert len(calls) == 2 + 3  # then the same 429s count as ordinary failures
+
+
+def test_the_wait_is_read_in_milliseconds_too() -> None:
+    responses = [tpm_429("682.5ms"), httpx.Response(200, json=ok_body())]
+    client, sleeps = make_client(lambda request: responses.pop(0))
+    run(client)
+    assert sleeps == [0.6825]
+
+
+def test_a_long_wait_named_in_the_body_fails_fast() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return tpm_429("120s")
+
+    client, _ = make_client(handler)
+    with pytest.raises(ModelTransportError, match="asks to wait 120s"):
+        run(client)
+    assert len(calls) == 1
+
+
+def test_the_header_wins_over_the_body_and_a_5xx_is_never_paced() -> None:
+    responses = [
+        httpx.Response(
+            429, headers={"Retry-After": "4"}, json={"error": {"message": "try again in 9s"}}
+        ),
+        httpx.Response(200, json=ok_body()),
+    ]
+    client, sleeps = make_client(lambda request: responses.pop(0))
+    run(client)
+    assert sleeps == [4.0]
+    busy = [httpx.Response(503, headers={"Retry-After": "2"}, text="try again in 1s")] * 3
+    client, _ = make_client(lambda request: busy[0])
+    with pytest.raises(ModelTransportError) as info:
+        run(client)
+    assert info.value.attempts == 3  # a server error is a failure, whatever its text says
+
+
 # ---------------------------------------------------------------- tool calls (untrusted)
 
 

@@ -660,6 +660,7 @@ This section exists so the changes are explicit and reviewable.
 31. **(Phase 9) Interruption is simulated at a model-call boundary.** A fresh controller resumes from the event log. Mid-tool crashes stay covered by the real SIGKILL integration test, not by benchmark tasks.
 32. **(Phase 9) "Safety violations" counts crossed boundaries, not refusals.** The oracle finds real breaches (a canary outside the workspace changed). Dispatcher refusals are reported as `policy_rejections`, because a refusal cannot tell an attack from a model mistake.
 33. **(Phase 9) The baseline comparison against another agent is not done.** `bench export` and `bench grade` make a like-for-like grading possible, but running another agent needs it installed on your machine. Holdout tasks are hidden from the agent, not from the developer.
+34. **(v2) A rate limit that names its wait is paced, not counted as a failure.** Section 7 says retries are bounded at 3 attempts. On a free tier that caps tokens per minute (Groq: 8000), a 429 reads "try again in 18s": the provider is not failing, it asks us to slow down. Live runs showed calls needing three such waits in a row, and a fourth would have failed the whole task. Now a 429 whose wait is stated (header or message) and at most 30 s is waited out exactly, up to 8 times and 180 s per call, without using an attempt. A 429 with no stated wait, every timeout and every 5xx still use the 3 attempts. A stated wait over 30 s (a daily quota) still fails at once.
 
 ---
 
@@ -794,6 +795,7 @@ Anything beyond that is v0.2+.
 | 0.5 | 2026-10 | Implementation notes for Phase 7: deviations 21 to 24 in section 14 (per-program desktop access, `sensitive` effect, UI Automation actions, unverified Windows backend). |
 | 0.6 | 2026-10 | Implementation notes for Phase 8: deviations 25 to 28 in section 14 (image provider interface and offline default, inspected bytes, `image_saved` re-check, unverified hosted provider). |
 | 0.7 | 2026-10 | Implementation notes for Phase 9: deviations 29 to 33 in section 14 (independent oracle, validated and frozen suite, simulated interruption, safety-violation definition, baseline comparison not done). |
+| 0.8 | 2026-10 | v2 notes: deviation 34 in section 14 (paced rate-limit waits do not use up retry attempts). |
 
 ---
 

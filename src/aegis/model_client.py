@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -170,6 +171,18 @@ def _is_retryable(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
 
 
+_BODY_HINT = re.compile(r"try again in (\d+(?:\.\d+)?)\s*(ms|s)\b", re.IGNORECASE)
+
+
+def _body_retry_hint(text: str) -> float | None:
+    """The wait a provider names in an error body, e.g. 'Please try again in 18.09s'."""
+    found = _BODY_HINT.search(text)
+    if found is None:
+        return None
+    seconds = float(found.group(1))
+    return seconds / 1000 if found.group(2).lower() == "ms" else seconds
+
+
 def _parse_retry_after(value: str | None) -> float | None:
     if value is None:
         return None
@@ -214,6 +227,8 @@ class HttpModelClient(ABC):
         max_attempts: int = 3,
         base_backoff_s: float = 0.5,
         max_backoff_s: float = 30.0,
+        max_paced_waits: int = 8,
+        max_paced_total_s: float = 180.0,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
@@ -226,6 +241,8 @@ class HttpModelClient(ABC):
         self._max_attempts = max_attempts
         self._base_backoff_s = base_backoff_s
         self._max_backoff_s = max_backoff_s
+        self._max_paced_waits = max_paced_waits
+        self._max_paced_total_s = max_paced_total_s
         self._transport = transport
         self._sleep = sleep
 
@@ -309,11 +326,24 @@ class HttpModelClient(ABC):
     async def _post_with_retry(
         self, payload: dict[str, Any], timeout_s: float
     ) -> tuple[dict[str, Any], int]:
+        """POST with bounded retries.
+
+        Two kinds of waiting are kept apart. A FAILURE (timeout, 5xx, a 429 with no stated wait)
+        uses one of `max_attempts` and backs off. A PACED wait is a 429 in which the provider
+        says exactly how long to wait (free tiers cap tokens per minute): the provider is not
+        failing, it is asking us to slow down, so it does not use up an attempt. Paced waits are
+        still bounded in count and in total time, so a call can never wait for ever.
+        """
         last_error = "unknown error"
         last_status: int | None = None
+        failures = 0
+        tries = 0
+        paced = 0
+        paced_total = 0.0
         async with httpx.AsyncClient(transport=self._transport, timeout=timeout_s) as client:
-            for attempt in range(1, self._max_attempts + 1):
+            while True:
                 await self._rate_limiter.wait()
+                tries += 1
                 retry_after: float | None = None
                 try:
                     response = await client.post(self._url(), headers=self._headers(), json=payload)
@@ -322,39 +352,60 @@ class HttpModelClient(ABC):
                     last_error = f"{type(exc).__name__}: {exc}"
                 else:
                     if response.is_success:
-                        return self._decode_json(response), attempt
+                        return self._decode_json(response), tries
                     last_status = response.status_code
                     last_error = f"HTTP {response.status_code}: {redact(response.text[:300])}"
                     if response.status_code == 400 and "tool_use_failed" in response.text:
                         raise ModelToolCallError(
-                            last_error, status_code=last_status, attempts=attempt
+                            last_error, status_code=last_status, attempts=tries
                         )
                     if not _is_retryable(response.status_code):
                         raise ModelTransportError(
-                            last_error, status_code=last_status, attempts=attempt
+                            last_error, status_code=last_status, attempts=tries
                         )
                     retry_after = _parse_retry_after(response.headers.get("retry-after"))
-                    if retry_after is not None and retry_after > self._max_backoff_s:
+                    hinted = retry_after
+                    if hinted is None and response.status_code == 429:
+                        hinted = _body_retry_hint(response.text)
+                    if hinted is not None and hinted > self._max_backoff_s:
                         # e.g. a daily quota: waiting a few seconds will not help, so fail fast.
                         raise ModelTransportError(
-                            f"rate limited; provider asks to wait {retry_after:.0f}s. {last_error}",
+                            f"rate limited; provider asks to wait {hinted:.0f}s. {last_error}",
                             status_code=last_status,
-                            attempts=attempt,
+                            attempts=tries,
                         )
-                if attempt < self._max_attempts:
-                    delay = self._backoff(attempt, retry_after)
-                    logger.warning(
-                        "model call failed (attempt %d/%d): %s; retrying in %.1fs",
-                        attempt,
-                        self._max_attempts,
-                        last_error,
-                        delay,
-                    )
-                    await self._sleep(delay)
+                    if (
+                        response.status_code == 429
+                        and hinted is not None
+                        and paced < self._max_paced_waits
+                        and paced_total + hinted <= self._max_paced_total_s
+                    ):
+                        paced += 1
+                        paced_total += hinted
+                        logger.warning(
+                            "rate limited, pausing as the provider asked (%d/%d): %.1fs",
+                            paced,
+                            self._max_paced_waits,
+                            hinted,
+                        )
+                        await self._sleep(hinted)
+                        continue
+                failures += 1
+                if failures >= self._max_attempts:
+                    break
+                delay = self._backoff(failures, retry_after)
+                logger.warning(
+                    "model call failed (attempt %d/%d): %s; retrying in %.1fs",
+                    failures,
+                    self._max_attempts,
+                    last_error,
+                    delay,
+                )
+                await self._sleep(delay)
         raise ModelTransportError(
-            f"gave up after {self._max_attempts} attempts: {last_error}",
+            f"gave up after {tries} attempts: {last_error}",
             status_code=last_status,
-            attempts=self._max_attempts,
+            attempts=tries,
         )
 
     @staticmethod
