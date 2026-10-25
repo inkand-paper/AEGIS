@@ -154,3 +154,12 @@ success falsely. When writing the comparison, state that, and include the tasks 
   only if its own acceptance criteria are met.
 - Browser tasks use a local static site on 127.0.0.1 with a port the harness picks and allows by
   exact name.
+
+## Suite changelog
+
+- **1.1** (`9acd453ac5ef`): fixed `fm-replace-word`. The 1.0 instruction asked to change the *word*
+  `colour`, the document contained `colourful`, and the oracle replaced substrings, so an agent
+  that correctly left `colourful` alone was graded as failed. Found by the first live run
+  (4/5 on the dev file_manipulation tasks). The instruction, the document and the oracle now all
+  say: whole word, lowercase only. This was an oracle defect, not a tuning of the task to the
+  agent; results from 1.0 and 1.1 are not comparable (`bench compare` warns on a hash change).

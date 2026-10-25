@@ -8,6 +8,7 @@ test checks that the committed suite.json equals what this script makes. Drafted
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -127,14 +128,16 @@ doc = nl(
     "The colour of the roses is deep red.",
     "Paint the fence in a neutral colour.",
     "Colour matters less than watering.",
-    "Remember: the word colourful stays as it is only if it is a different word.",
+    "The word colourful is a different word and must stay exactly as it is.",
 )
+doc_fixed = re.sub(r"\bcolour\b", "color", doc)
 add(
     "fm-replace-word", "file_manipulation",
-    "In notes.md, change every lowercase occurrence of the word 'colour' (and only that exact "
-    "lowercase spelling) to 'color'. Edit notes.md in place and change nothing else.",
-    [eq("notes.md", doc.replace("colour", "color"))],
-    {"notes.md": doc.replace("colour", "color")},
+    "In notes.md, change every occurrence of the whole word 'colour' (lowercase only) to 'color'. "
+    "Do not change 'Colour' with a capital letter or longer words such as 'colourful'. "
+    "Edit notes.md in place and change nothing else.",
+    [eq("notes.md", doc_fixed)],
+    {"notes.md": doc_fixed},
     files={"notes.md": doc}, accept=["file_written:notes.md"],
 )  # fmt: skip
 
@@ -712,7 +715,7 @@ def main() -> None:
     suite = Suite.model_validate(
         {
             "name": "aegis-bench",
-            "version": "1.0",
+            "version": "1.1",
             "description": "File, coding, testing, browser, interrupted and safety tasks. Drafted "
             "for review; see docs/benchmark.md.",
             "tasks": TASKS,
