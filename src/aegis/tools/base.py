@@ -109,6 +109,30 @@ class Tool[A: BaseModel, R: BaseModel](ABC):
         return None
 
 
+_VALUE_KEYS = frozenset({"default", "enum", "const", "examples"})
+
+
+def compact_schema(node: Any) -> Any:
+    """A JSON schema without Pydantic's redundant "title" fields, which only repeat the argument
+    name ("Path" for `path`) and cost tokens on every model call. Names under "properties" and
+    literal values (defaults, enums) are left alone."""
+    if isinstance(node, list):
+        return [compact_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key == "properties" and isinstance(value, dict):
+            out[key] = {name: compact_schema(sub) for name, sub in value.items()}
+        elif key in _VALUE_KEYS:
+            out[key] = value
+        else:
+            out[key] = compact_schema(value)
+    return out
+
+
 class ToolRegistry:
     """Explicit registration only. There is no auto-discovery (it hides the attack surface)."""
 
@@ -146,7 +170,7 @@ class ToolRegistry:
             {
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": tool.arg_model.model_json_schema(),
+                "parameters": compact_schema(tool.arg_model.model_json_schema()),
             }
             for tool in self._tools.values()
             if (network or not tool.requires_network)

@@ -107,3 +107,20 @@ def test_both_prompts_say_the_model_can_parse_and_count_data_itself() -> None:
     for prompt in (PLAN_SYSTEM_PROMPT, REVISE_SYSTEM_PROMPT):
         assert 'a missing "CSV tool"' in prompt or 'missing "CSV tool"' in prompt
     assert "OUTSIDE capability" in PLAN_SYSTEM_PROMPT
+
+
+def test_the_plan_prompt_lists_each_tools_arguments() -> None:
+    from aegis.planner import format_tools
+    from aegis.tools import default_registry
+
+    text = format_tools(default_registry().list_for_model())
+    line = next(x for x in text.splitlines() if x.startswith("- image_generate("))
+    assert "width?" in line and "height?" in line  # optional, but the plan can now use them
+    assert "prompt," in line and "path," in line  # required ones carry no question mark
+
+
+def test_format_tools_handles_a_tool_with_no_arguments() -> None:
+    from aegis.planner import format_tools
+
+    out = format_tools([{"name": "ping", "description": "Ping.", "parameters": {}}])
+    assert out == "- ping(): Ping."

@@ -153,12 +153,27 @@ def execution_order(plan: Plan) -> list[Step]:
     return ordered
 
 
+def format_tools(listing: list[dict[str, Any]]) -> str:
+    """One line per tool with its argument names, so the plan can use what a tool really offers.
+    (A live run planned 'image_generate cannot set the size' although it has width and height.)
+    Optional arguments end with '?'."""
+    lines = []
+    for tool in listing:
+        schema = tool.get("parameters") or {}
+        required = set(schema.get("required", []))
+        names = [
+            name if name in required else f"{name}?" for name in (schema.get("properties") or {})
+        ]
+        lines.append(f"- {tool['name']}({', '.join(names)}): {tool['description']}")
+    return "\n".join(lines)
+
+
 class Planner:
     def __init__(self, *, max_tokens: int = 4000) -> None:
         self._max_tokens = max_tokens
 
     async def create_plan(self, task: Task, tool_listing: list[dict[str, Any]], ask: Ask) -> Plan:
-        tools = "\n".join(f"- {t['name']}: {t['description']}" for t in tool_listing)
+        tools = format_tools(tool_listing)
         messages = [
             Message(role="system", content=PLAN_SYSTEM_PROMPT.replace("{tools}", tools)),
             Message(role="user", content=f"Objective: {task.objective}"),
@@ -195,7 +210,7 @@ class Planner:
     ) -> Plan:
         """Build the next plan: finished steps are kept as they are, the rest is re-planned."""
         done = [s for s in execution_order(current) if s.status is StepStatus.DONE]
-        tools = "\n".join(f"- {t['name']}: {t['description']}" for t in tool_listing)
+        tools = format_tools(tool_listing)
         lines = [f"Objective: {task.objective}", "", "Steps already done:"]
         if done:
             for step in done:

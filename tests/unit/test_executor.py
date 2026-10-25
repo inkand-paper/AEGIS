@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -403,3 +404,39 @@ def test_registering_a_name_twice_fails() -> None:
     registry.register(SpyTool())
     with pytest.raises(ValueError, match="already registered"):
         registry.register(SpyTool())
+
+
+def test_schema_sent_to_the_model_drops_titles_but_keeps_names_and_values() -> None:
+    from aegis.tools.base import compact_schema
+
+    schema = {
+        "title": "Args",
+        "type": "object",
+        "properties": {
+            "title": {"title": "Title", "type": "string", "default": {"title": "keep me"}},
+            "mode": {"title": "Mode", "enum": ["a", "b"]},
+            "inner": {
+                "title": "Inner",
+                "anyOf": [{"title": "X", "type": "integer"}, {"type": "null"}],
+            },
+        },
+        "required": ["title"],
+    }
+    out = compact_schema(schema)
+    assert "title" not in out  # the annotation is gone ...
+    assert list(out["properties"]) == ["title", "mode", "inner"]  # ... a property NAMED title stays
+    assert out["properties"]["title"] == {"type": "string", "default": {"title": "keep me"}}
+    assert out["properties"]["mode"] == {"enum": ["a", "b"]}
+    assert out["properties"]["inner"]["anyOf"][0] == {"type": "integer"}
+    assert out["required"] == ["title"]
+
+
+def test_the_real_tool_schemas_lose_only_titles() -> None:
+    from aegis.tools import default_registry
+
+    registry = default_registry()
+    for tool in registry.list_for_model():
+        raw = registry.get(tool["name"]).arg_model.model_json_schema()
+        assert set(tool["parameters"]["properties"]) == set(raw["properties"])
+        assert tool["parameters"].get("required") == raw.get("required")
+        assert '"title"' not in json.dumps(tool["parameters"])
