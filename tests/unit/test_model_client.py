@@ -466,3 +466,19 @@ def test_anthropic_request_translation_and_response_parsing() -> None:
     assert response.finish_reason == "tool_calls"
     assert response.tool_calls[0].arguments == {"expression": "2+2"}
     assert response.usage.total_tokens == 15
+
+
+def test_a_per_minute_limit_wait_of_over_thirty_seconds_is_waited_out() -> None:
+    """Seen live: 'tokens per minute ... try again in 35.2s' stopped a benchmark run, although
+    a minute-window limit always clears. Only waits beyond about a minute are a daily quota."""
+    responses = [tpm_429("35.2s"), httpx.Response(200, json=ok_body())]
+    client, sleeps = make_client(lambda request: responses.pop(0))
+    run(client)
+    assert sleeps == [35.2]
+
+
+def test_a_wait_just_over_the_per_minute_ceiling_fails_fast() -> None:
+    client, sleeps = make_client(lambda request: tpm_429("76s"))
+    with pytest.raises(ModelTransportError, match="asks to wait 76s"):
+        run(client)
+    assert sleeps == []

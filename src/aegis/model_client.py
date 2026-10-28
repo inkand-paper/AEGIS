@@ -227,6 +227,7 @@ class HttpModelClient(ABC):
         max_attempts: int = 3,
         base_backoff_s: float = 0.5,
         max_backoff_s: float = 30.0,
+        max_wait_s: float = 75.0,
         max_paced_waits: int = 8,
         max_paced_total_s: float = 180.0,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -241,6 +242,8 @@ class HttpModelClient(ABC):
         self._max_attempts = max_attempts
         self._base_backoff_s = base_backoff_s
         self._max_backoff_s = max_backoff_s
+        # A per-minute limit never asks for more than about a minute; longer is a daily quota.
+        self._max_wait_s = max_wait_s
         self._max_paced_waits = max_paced_waits
         self._max_paced_total_s = max_paced_total_s
         self._transport = transport
@@ -367,8 +370,8 @@ class HttpModelClient(ABC):
                     hinted = retry_after
                     if hinted is None and response.status_code == 429:
                         hinted = _body_retry_hint(response.text)
-                    if hinted is not None and hinted > self._max_backoff_s:
-                        # e.g. a daily quota: waiting a few seconds will not help, so fail fast.
+                    if hinted is not None and hinted > self._max_wait_s:
+                        # e.g. a daily quota: waiting a minute will not help, so fail fast.
                         raise ModelTransportError(
                             f"rate limited; provider asks to wait {hinted:.0f}s. {last_error}",
                             status_code=last_status,
