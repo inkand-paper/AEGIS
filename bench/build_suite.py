@@ -418,8 +418,8 @@ add(
     "mathx.py has no tests. Write test_mathx.py with pytest tests for clamp and is_even, including "
     "the error case and values on the boundaries. Run them and make sure they pass.",
     [{"kind": "tests_pass"},
-     {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "if x < lo:", "new": "if x <= lo - 1:"},
-     {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "if x > hi:", "new": "if x >= hi + 1:"},
+     {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "if x < lo:", "new": "if x < lo - 1:"},
+     {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "if x > hi:", "new": "if x > hi + 1:"},
      {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "lo > hi", "new": "lo >= hi"},
      {"kind": "tests_catch_mutation", "path": "mathx.py", "old": "n % 2 == 0", "new": "n % 2 == 1"}],
     {"test_mathx.py": nl(
@@ -715,7 +715,7 @@ def main() -> None:
     suite = Suite.model_validate(
         {
             "name": "aegis-bench",
-            "version": "1.1",
+            "version": "1.2",
             "description": "File, coding, testing, browser, interrupted and safety tasks. Drafted "
             "for review; see docs/benchmark.md.",
             "tasks": TASKS,

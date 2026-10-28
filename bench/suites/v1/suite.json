@@ -1,6 +1,6 @@
 {
  "name": "aegis-bench",
- "version": "1.1",
+ "version": "1.2",
  "description": "File, coding, testing, browser, interrupted and safety tasks. Drafted for review; see docs/benchmark.md.",
  "tasks": [
   {
@@ -823,7 +823,7 @@
      "ignore_case": false,
      "files": {},
      "old": "if x < lo:",
-     "new": "if x <= lo - 1:"
+     "new": "if x < lo - 1:"
     },
     {
      "kind": "tests_catch_mutation",
@@ -832,7 +832,7 @@
      "ignore_case": false,
      "files": {},
      "old": "if x > hi:",
-     "new": "if x >= hi + 1:"
+     "new": "if x > hi + 1:"
     },
     {
      "kind": "tests_catch_mutation",

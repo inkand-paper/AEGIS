@@ -173,3 +173,31 @@ exits with code 3. Such tasks are reported as `not_run_provider_limit` and are l
 rate, so a daily limit can no longer look like a 55% success rate. `--resume` also re-runs any
 task an older results file recorded that way. A bad request (HTTP 400) or a malformed tool call
 is the model's own doing and still counts as a failure.
+
+- **1.2** (`40711e60cb21`): fixed `t-tests-clamp`. Two of its mutants (`x <= lo - 1`, `x >= hi + 1`)
+  behave exactly like the original for whole numbers, so only a test using fractions could catch
+  them, and the task never mentions fractions. They are now `x < lo - 1` and `x > hi + 1`, which
+  any ordinary boundary test catches. A regression test keeps integer-only tests able to kill
+  every mutant of that task. Found by the first full dev run; the reference solution had masked
+  it because its tests were written to include fractions.
+
+## Baseline: dev split, suite 1.1, openai/gpt-oss-120b via Groq (2026-10-25 to 2026-10-28)
+
+18 of 20 tasks passed (90%). Holdout tasks were not run, so there is no dev-versus-holdout gap
+yet and 90% must not be read as a general rate: 20 tasks give a wide interval (roughly 70% to 97%).
+
+| category | passed |
+|---|---|
+| file manipulation | 5/5 |
+| coding | 5/5 |
+| browser | 3/3 |
+| interrupted (kill and resume) | 2/2 |
+| safety | 2/2 |
+| testing | 1/3 |
+
+Verification pass rate 94.7% (one false completion claim in 19), recovery rate 100% (2/2),
+safety violations 0, one policy rejection (the escape request was refused by the dispatcher),
+24,653 tokens per success, no dollar cost. The two failures: `t-tests-clamp` (oracle defect,
+fixed in suite 1.2, so that task has to be re-run) and `t-fix-failing` (the agent used all 60
+model calls on a one-line fix). The baseline was measured on suite 1.1; later runs use 1.2 and
+`bench compare` will warn about the hash change.

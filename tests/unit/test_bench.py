@@ -884,3 +884,23 @@ def test_resume_reruns_tasks_an_older_run_recorded_as_provider_failures(tmp_path
         )
     )  # fmt: skip
     assert report["metrics"]["succeeded"] == 1 and report["metrics"]["not_run_provider_limit"] == 0
+
+
+def test_no_clamp_mutant_needs_inputs_the_task_never_mentions() -> None:
+    """`x <= lo - 1` is the same as `x < lo` for whole numbers, so only a float test could catch
+    it. A mutant an honest solution cannot kill makes the oracle unfair (suite 1.2)."""
+    suite = json.loads(Path("bench/suites/v1/suite.json").read_text(encoding="utf-8"))
+    task = next(t for t in suite["tasks"] if t["id"] == "t-tests-clamp")
+    mutants = [(c["old"], c["new"]) for c in task["oracle"] if c["kind"] == "tests_catch_mutation"]
+    source = task["setup"]["files"]["mathx.py"]
+    integer_tests = (
+        "assert clamp(5,0,10)==5 and clamp(-1,0,10)==0 and clamp(11,0,10)==10\n"
+        "assert clamp(0,0,10)==0 and clamp(10,0,10)==10\n"
+        "try:\n    clamp(1,5,4)\n    raise SystemExit('no error')\nexcept ValueError:\n    pass\n"
+        "assert clamp(3,2,2)==2\nassert is_even(2) and not is_even(3)\n"
+    )
+    for old, new in mutants:
+        namespace: dict[str, Any] = {}
+        exec(source.replace(old, new), namespace)  # noqa: S102 - our own fixture text
+        with pytest.raises((AssertionError, SystemExit, ValueError)):
+            exec(integer_tests, namespace)  # noqa: S102
