@@ -124,3 +124,15 @@ def test_format_tools_handles_a_tool_with_no_arguments() -> None:
 
     out = format_tools([{"name": "ping", "description": "Ping.", "parameters": {}}])
     assert out == "- ping(): Ping."
+
+
+def test_the_prompts_discourage_padding_and_wandering() -> None:
+    """The first full benchmark run showed 7-step plans for a one-line fix, a step that only
+    listed files, and a scratch file the agent made to explore something it was not asked."""
+    from aegis.controller import AGENT_SYSTEM_PROMPT
+    from aegis.planner import PLAN_SYSTEM_PROMPT
+
+    assert "as few steps as the work needs" in PLAN_SYSTEM_PROMPT
+    assert "Do not plan a step only to list files" in PLAN_SYSTEM_PROMPT
+    assert "do not list the workspace" in AGENT_SYSTEM_PROMPT
+    assert "do not create scratch files" in AGENT_SYSTEM_PROMPT

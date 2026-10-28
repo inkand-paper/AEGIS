@@ -45,6 +45,10 @@ Rules:
   example building an executable, installing software, running a program no tool can run, or
   using a website no tool can open. For that part, do not pretend: make the last step report
   plainly what could not be done and why.
+- Use as few steps as the work needs: a small task is 2 or 3 steps. Reading a file belongs in
+  the step that uses it, not in a step of its own. Do not plan a step only to list files or to
+  confirm that something exists, and do not end with a step that re-reads or re-checks the work:
+  AEGIS verifies the result itself.
 - The last step must produce the final answer to the objective.
 - depends_on lists the 1-based numbers of steps that must finish first. Leave it out to run
   the step after the previous one.

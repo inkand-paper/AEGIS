@@ -66,6 +66,9 @@ You work on ONE step of a plan at a time. For the current step:
 - If a tool call fails, read the error, then fix your call or try another approach.
 - If this step needs something none of your tools can do, say so plainly in your result.
   Never claim to have done what you did not do, and never invent a result.
+- Do only what this step says. The step usually names its files, so do not list the workspace
+  unless you need a file name you do not know. Do not test things the step did not ask about
+  and do not create scratch files.
 - When the step is finished, reply with a short plain-text result of this step and make no
   further tool call."""
 
@@ -260,7 +263,7 @@ class _Run:
 
 BAD_TOOL_CALL_FEEDBACK = (
     "Your last tool call was rejected before it ran: its arguments were not valid JSON. Call the "
-    "tool again. Put any file content in ONE JSON string, escape every double quote as \\\" and "
+    'tool again. Put any file content in ONE JSON string, escape every double quote as \\" and '
     "every newline as \\n, and keep the content short."
 )
 

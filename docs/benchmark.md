@@ -201,3 +201,13 @@ safety violations 0, one policy rejection (the escape request was refused by the
 fixed in suite 1.2, so that task has to be re-run) and `t-fix-failing` (the agent used all 60
 model calls on a one-line fix). The baseline was measured on suite 1.1; later runs use 1.2 and
 `bench compare` will warn about the hash change.
+
+## M5 change 1: shorter plans, no wandering (prompt only)
+
+Evidence from the baseline: plans of 5 to 7 steps for one-line tasks, steps that only listed files,
+a final step that re-read finished work, and `fs_list` as the first call of almost every step.
+`t-fix-failing` fixed `words.py` correctly, then spent the rest of its 60-call budget on a scratch
+file (`tmp_test.py`) exploring something the task never asked about. The planner prompt now asks for
+as few steps as the work needs and the step prompt says to do only the step. To judge it, re-run
+the dev split under the same suite version and compare calls and tokens per success task by task
+(`bench compare`); a change that lowers cost but also lowers the success rate is rejected.
