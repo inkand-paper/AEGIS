@@ -72,6 +72,23 @@ You work on ONE step of a plan at a time. For the current step:
 - When the step is finished, reply with a short plain-text result of this step and make no
   further tool call."""
 
+# Added only to a step that writes tests, so other steps do not pay for it. The first full
+# benchmark run showed tests that looked complete but missed the value just outside a boundary
+# and the equal-limits case, so a wrong implementation still passed them.
+TEST_WRITING_PROMPT = """
+
+When you write tests: cover every boundary on both sides (the boundary value, the value just
+inside it and the value just outside it) and the degenerate cases (empty input, zero, equal
+limits). For each test ask: would a slightly wrong implementation, such as an off-by-one, still
+pass it? If so, add the case that would catch it."""
+
+
+def _writes_tests(description: str) -> bool:
+    """A step that creates or extends tests (not one that only runs them)."""
+    text = description.lower()
+    return "test" in text and any(word in text for word in ("create", "write", "add "))
+
+
 MAX_STEP_RESULT_CHARS = 500
 MAX_STORED_RESULT_CHARS = 4000  # a step's result text is kept in its event so a resume can use it
 # Effects a task may declare up front. "external" is only ever opened by naming hosts to allow.
@@ -1116,8 +1133,11 @@ class Controller:
         if feedback:
             parts.append(f"Note: the previous attempt at this step failed: {feedback}")
         parts.append("Work on this step only.")
+        system = AGENT_SYSTEM_PROMPT
+        if _writes_tests(step.description):
+            system += TEST_WRITING_PROMPT
         return [
-            Message(role="system", content=AGENT_SYSTEM_PROMPT),
+            Message(role="system", content=system),
             Message(role="user", content="\n\n".join(parts)),
         ]
 

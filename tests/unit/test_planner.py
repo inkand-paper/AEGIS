@@ -136,3 +136,13 @@ def test_the_prompts_discourage_padding_and_wandering() -> None:
     assert "Do not plan a step only to list files" in PLAN_SYSTEM_PROMPT
     assert "do not list the workspace" in AGENT_SYSTEM_PROMPT
     assert "do not create scratch files" in AGENT_SYSTEM_PROMPT
+
+
+def test_test_writing_guidance_is_added_only_to_steps_that_write_tests() -> None:
+    from aegis.controller import TEST_WRITING_PROMPT, _writes_tests
+
+    assert _writes_tests("Create test_cart.py with pytest tests for total")
+    assert _writes_tests("Write a new test file test_mathx.py")
+    assert not _writes_tests("Run pytest on the project to verify that all tests pass")
+    assert not _writes_tests("Read the contents of words.py")
+    assert "value just outside" in TEST_WRITING_PROMPT and "equal" in TEST_WRITING_PROMPT

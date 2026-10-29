@@ -211,3 +211,14 @@ file (`tmp_test.py`) exploring something the task never asked about. The planner
 as few steps as the work needs and the step prompt says to do only the step. To judge it, re-run
 the dev split under the same suite version and compare calls and tokens per success task by task
 (`bench compare`); a change that lowers cost but also lowers the success rate is rejected.
+
+## M5 change 2: guidance for steps that write tests
+
+`t-tests-clamp` (suite 1.2, fair mutants) still failed: the agent's tests covered the exact
+boundaries and far-away values but not the value just outside the upper bound (`clamp(11, 1, 10)`)
+nor equal limits (`clamp(3, 2, 2)`), so an off-by-one and a `>=` slip passed them, and the agent
+reported success. That is the failure mode the oracle exists to catch, so the oracle stays as it
+is. A short instruction (boundary on both sides, degenerate cases, "would an off-by-one still
+pass?") is added to the step prompt only for steps that create tests. The judge is the testing
+tasks that were not used to write it: `t-tests-validator` and `t-tests-bank` are holdout, so the
+dev-versus-holdout gap on the testing category shows whether it generalises or only fits clamp.
