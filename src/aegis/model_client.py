@@ -55,8 +55,10 @@ class ModelTransportError(ModelClientError):
 
 class ModelToolCallError(ModelTransportError):
     """The provider could not parse the tool call the model wrote (for example Groq's HTTP 400
-    `tool_use_failed`: the arguments were not valid JSON). The model can be asked to try again,
-    unlike a bad key or a missing model, so the controller treats this as a recoverable turn."""
+    `tool_use_failed`: the arguments were not valid JSON, or 'Tool choice is none, but model
+    called a tool' when it called a tool in a call that offered none). The model can be asked
+    to try again, unlike a bad key or a missing model, so the controller treats this as a
+    recoverable turn."""
 
 
 # --------------------------------------------------------------------------- data contracts
@@ -358,7 +360,9 @@ class HttpModelClient(ABC):
                         return self._decode_json(response), tries
                     last_status = response.status_code
                     last_error = f"HTTP {response.status_code}: {redact(response.text[:300])}"
-                    if response.status_code == 400 and "tool_use_failed" in response.text:
+                    if response.status_code == 400 and (
+                        "tool_use_failed" in response.text or "Tool choice is none" in response.text
+                    ):
                         raise ModelToolCallError(
                             last_error, status_code=last_status, attempts=tries
                         )

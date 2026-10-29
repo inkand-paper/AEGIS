@@ -482,3 +482,16 @@ def test_a_wait_just_over_the_per_minute_ceiling_fails_fast() -> None:
     with pytest.raises(ModelTransportError, match="asks to wait 76s"):
         run(client)
     assert sleeps == []
+
+
+def test_a_tool_call_in_a_call_that_offered_no_tools_is_a_tool_call_error() -> None:
+    """Live Groq run: the planner offers no tools, the model called one, HTTP 400."""
+    body = {
+        "error": {
+            "message": "Tool choice is none, but model called a tool",
+            "type": "invalid_request_error",
+        }
+    }
+    client, _ = make_client(lambda request: httpx.Response(400, json=body))
+    with pytest.raises(ModelToolCallError):
+        run(client)

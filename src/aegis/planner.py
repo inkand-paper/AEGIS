@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aegis.model_client import Message, ModelResponse
+from aegis.model_client import Message, ModelResponse, ModelToolCallError
 from aegis.models import Plan, Step, StepStatus, Task
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,23 @@ Ask = Callable[[list[Message], list[dict[str, Any]], int], Awaitable[ModelRespon
 
 class PlanError(Exception):
     """The model did not produce a usable plan."""
+
+
+NO_TOOL_IN_PLANNING = (
+    "Do not call any tool now. Reply with ONLY the JSON object described in the instructions."
+)
+
+
+async def _ask_for_plan(ask: Ask, messages: list[Message], max_tokens: int) -> ModelResponse:
+    """Ask for a plan. Some models try to call a tool during planning (no tools are offered, so
+    the provider answers HTTP 400 'Tool choice is none'): say so and ask again, twice at most."""
+    for _ in range(2):
+        try:
+            return await ask(messages, [], max_tokens)
+        except ModelToolCallError:
+            logger.warning("the model tried to call a tool while planning; asking again")
+            messages.append(Message(role="user", content=NO_TOOL_IN_PLANNING))
+    return await ask(messages, [], max_tokens)
 
 
 PLAN_SYSTEM_PROMPT = """You are the planning component of AEGIS, an autonomous agent.
@@ -184,7 +201,7 @@ class Planner:
         ]
         last_error = "unknown"
         for attempt in (1, 2):  # one retry, with the validation error fed back to the model
-            response = await ask(messages, [], self._max_tokens)
+            response = await _ask_for_plan(ask, messages, self._max_tokens)
             try:
                 return build_plan(task.id, _extract_json(response.text or ""))
             except PlanError as exc:
@@ -232,7 +249,7 @@ class Planner:
         ]
         last_error = "unknown"
         for attempt in (1, 2):
-            response = await ask(messages, [], self._max_tokens)
+            response = await _ask_for_plan(ask, messages, self._max_tokens)
             try:
                 fresh = build_plan(task.id, _extract_json(response.text or ""))
                 return merge_revision(current, done, fresh, revision)

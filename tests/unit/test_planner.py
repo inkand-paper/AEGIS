@@ -146,3 +146,50 @@ def test_test_writing_guidance_is_added_only_to_steps_that_write_tests() -> None
     assert not _writes_tests("Run pytest on the project to verify that all tests pass")
     assert not _writes_tests("Read the contents of words.py")
     assert "value just outside" in TEST_WRITING_PROMPT and "equal" in TEST_WRITING_PROMPT
+
+
+def _plan_text() -> str:
+    return '{"steps": [{"description": "Read data.csv"}, {"description": "Write the sum"}]}'
+
+
+def _task() -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id="t1", objective="sum it")  # the planner reads only these two
+
+
+def test_a_tool_call_during_planning_is_asked_again_with_a_reminder() -> None:
+    import asyncio
+
+    from aegis.model_client import ModelResponse, ModelToolCallError, ModelUsage
+    from aegis.planner import NO_TOOL_IN_PLANNING, Planner
+
+    seen: list[int] = []
+
+    async def ask(messages: Any, tools: Any, max_tokens: int) -> Any:
+        seen.append(len(messages))
+        if len(seen) == 1:
+            raise ModelToolCallError("HTTP 400: Tool choice is none, but model called a tool")
+        assert messages[-1].content == NO_TOOL_IN_PLANNING
+        return ModelResponse(text=_plan_text(), usage=ModelUsage())
+
+    plan = asyncio.run(Planner().create_plan(_task(), [], ask))
+    assert [s.description for s in plan.steps] == ["Read data.csv", "Write the sum"]
+    assert seen == [2, 3]
+
+
+def test_planning_gives_up_after_the_model_keeps_calling_tools() -> None:
+    import asyncio
+
+    from aegis.model_client import ModelToolCallError
+    from aegis.planner import Planner
+
+    calls: list[int] = []
+
+    async def ask(messages: Any, tools: Any, max_tokens: int) -> Any:
+        calls.append(1)
+        raise ModelToolCallError("HTTP 400: Tool choice is none, but model called a tool")
+
+    with pytest.raises(ModelToolCallError):
+        asyncio.run(Planner().create_plan(_task(), [], ask))
+    assert len(calls) == 3
