@@ -206,6 +206,8 @@ class Planner:
                 return build_plan(task.id, _extract_json(response.text or ""))
             except PlanError as exc:
                 last_error = str(exc)
+                snippet = (response.text or "").strip().replace("\n", " ")[:200]
+                last_error = f"{last_error} (reply began: {snippet!r})"
                 logger.warning("plan attempt %d rejected: %s", attempt, last_error)
                 messages.append(Message(role="assistant", content=response.text or ""))
                 messages.append(
@@ -255,6 +257,8 @@ class Planner:
                 return merge_revision(current, done, fresh, revision)
             except PlanError as exc:
                 last_error = str(exc)
+                snippet = (response.text or "").strip().replace("\n", " ")[:200]
+                last_error = f"{last_error} (reply began: {snippet!r})"
                 logger.warning("revised plan attempt %d rejected: %s", attempt, last_error)
                 messages.append(Message(role="assistant", content=response.text or ""))
                 messages.append(
