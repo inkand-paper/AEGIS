@@ -222,3 +222,26 @@ is. A short instruction (boundary on both sides, degenerate cases, "would an off
 pass?") is added to the step prompt only for steps that create tests. The judge is the testing
 tasks that were not used to write it: `t-tests-validator` and `t-tests-bank` are holdout, so the
 dev-versus-holdout gap on the testing category shows whether it generalises or only fits clamp.
+
+## M5 summary (2026-10-31)
+
+Changes made because of live benchmark evidence, each its own commit:
+
+| Change | Evidence | Outcome |
+|---|---|---|
+| Suite 1.1: `fm-replace-word` fixed | oracle replaced substrings, task said whole word | task now passes |
+| Suite 1.2: `t-tests-clamp` mutants fixed | two mutants equal to the original for integers | oracle fair; agent still fails it |
+| Provider limits not scored as failures | 7 of 9 "failures" in the first run never ran | scores reflect the agent |
+| Per-minute waits up to 75 s are waited out | run stopped on a 35 s per-minute hint | no stop on minute windows |
+| Shorter plans, no wandering (prompt) | 5-7 step plans for one-line fixes; `t-fix-failing` out of budget | `t-fix-failing` passes in 2 of 2 runs; cost per task not clearly lower |
+| Test-writing guidance (prompt, test steps only) | weak tests that missed off-by-one cases | both holdout testing tasks pass; `t-tests-clamp` still fails |
+| Planner: ask again when it calls a tool; log rejected replies | HTTP 400 on the planning call; undiagnosable JSON failure | failure now recoverable and inspectable |
+
+Known open weakness: `t-tests-clamp` fails in 3 of 3 runs. The agent's tests miss the value just
+outside the upper bound and equal limits, and it reports success. Prompt wording did not fix it.
+A structural option (a step that checks each test against likely wrong implementations) is not
+built, because it adds model calls to every testing task and P9 requires full-suite evidence first.
+
+Not yet measured: the 6 remaining dev tasks on suite 1.2, the 13 holdout tasks, a re-run of
+`t-tests-cart` after its one planner-format failure, and anything on a second model. Percentages
+from 20 dev tasks carry a wide interval and are not a general success rate.
