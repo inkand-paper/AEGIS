@@ -113,18 +113,16 @@ class Executor:
         """
         started_at = datetime.now(UTC)
         started = time.monotonic()
-        self._events.append(
-            ctx.task_id,
-            EventType.TOOL_CALL,
-            {
-                "tool_call_id": call.id,
-                "tool_name": call.tool_name,
-                "arguments": call.arguments,
-                "step_id": call.step_id,
-                "approved": approved,
-            },
-            correlation_id=call.id,
-        )
+        payload: dict[str, Any] = {
+            "tool_call_id": call.id,
+            "tool_name": call.tool_name,
+            "arguments": call.arguments,
+            "step_id": call.step_id,
+            "approved": approved,
+        }
+        if call.provider_extra is not None:
+            payload["provider_extra"] = call.provider_extra  # needed to replay it after a resume
+        self._events.append(ctx.task_id, EventType.TOOL_CALL, payload, correlation_id=call.id)
         try:
             result = await self._run(call, ctx, arguments_error, approved, refuse)
         except asyncio.CancelledError:

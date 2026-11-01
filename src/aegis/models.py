@@ -70,6 +70,9 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
     requested_at: datetime
     idempotency_key: str | None = None
+    # Opaque provider data (Gemini 3's thought signature) kept so a resumed task can replay
+    # the call to the model exactly as the model made it.
+    provider_extra: dict[str, Any] | None = None
 
 
 class EventType(StrEnum):

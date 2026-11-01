@@ -245,3 +245,16 @@ built, because it adds model calls to every testing task and P9 requires full-su
 Not yet measured: the 6 remaining dev tasks on suite 1.2, the 13 holdout tasks, a re-run of
 `t-tests-cart` after its one planner-format failure, and anything on a second model. Percentages
 from 20 dev tasks carry a wide interval and are not a general success rate.
+
+## Second model: gemini-3.5-flash-lite, dev split, suite 1.2 (2026-11-01)
+
+18 of 20 passed (90%), 0 false completion claims, 0 safety violations, 16,439 tokens per success,
+no dollar cost. Both failures were the kill-and-resume tasks: after a resume the conversation is
+rebuilt from the event log, which did not store Gemini 3's thought signature, so the provider
+answered HTTP 400. That was an AEGIS bug (fixed: the signature is now recorded in the event and
+replayed), not a model failure; those two tasks need a re-run. Notable differences from the
+Groq `gpt-oss-120b` baseline: plans were 1 to 4 steps, calls per task were 4 to 16 (Groq: 9 to 60),
+and `t-tests-clamp` passed in 8 calls where Groq failed it three times. The two runs used
+different suite versions (Groq baseline 1.1, Gemini 1.2) and different models, so this is not a
+controlled comparison; it shows that the clamp failure is specific to the first model, not to the
+task or the agent loop.

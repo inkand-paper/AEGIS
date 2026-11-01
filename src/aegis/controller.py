@@ -813,6 +813,7 @@ class Controller:
             tool_name=raw.name,
             arguments=raw.arguments,
             requested_at=datetime.now(UTC),
+            provider_extra=raw.extra_content,
         )
         key = _call_key(step.id, raw.name, raw.arguments)
         refuse = None
@@ -1008,6 +1009,7 @@ class Controller:
                     id=e.correlation_id or "",
                     name=e.payload["tool_name"],
                     arguments=e.payload["arguments"],
+                    extra_content=e.payload.get("provider_extra"),
                 )
                 for e in mine
             ]
@@ -1101,6 +1103,7 @@ class Controller:
                             id=call_id,
                             name=call.payload["tool_name"],
                             arguments=call.payload["arguments"],
+                            extra_content=call.payload.get("provider_extra"),
                         )
                     ],
                 )

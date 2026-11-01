@@ -904,3 +904,31 @@ def test_no_clamp_mutant_needs_inputs_the_task_never_mentions() -> None:
         exec(source.replace(old, new), namespace)  # noqa: S102 - our own fixture text
         with pytest.raises((AssertionError, SystemExit, ValueError)):
             exec(integer_tests, namespace)  # noqa: S102
+
+
+def test_a_resumed_task_replays_its_calls_with_the_provider_signature(tmp_path: Path) -> None:
+    """Live Gemini 3: after a kill-and-resume the conversation is rebuilt from the event log,
+    and a tool call without its thought signature is refused (HTTP 400)."""
+    from aegis.model_client import ModelResponse, RawToolCall
+
+    signature = {"google": {"thought_signature": "sig-xyz=="}}
+    signed = call_tools(("fs_write", {"path": "out.txt", "content": "5\n"}))
+    signed = ModelResponse(
+        text=None,
+        tool_calls=[
+            RawToolCall(**{**signed.tool_calls[0].model_dump(), "extra_content": signature})
+        ],
+        usage=signed.usage,
+        finish_reason="tool_calls",
+    )
+    model = ScriptedModel(say(plan_json("Write the file")), signed, say("Done."))
+    r = go(interrupted_task(), model, tmp_path)
+    assert r.interrupted and r.recovered and r.success
+    replayed = [
+        call
+        for messages in model.calls
+        for message in messages
+        for call in (message.tool_calls or [])
+    ]
+    assert replayed, "the resumed step should replay the finished call"
+    assert all(call.extra_content == signature for call in replayed)
