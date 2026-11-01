@@ -35,18 +35,19 @@ class ProviderPreset:
 
 
 PROVIDERS: dict[str, ProviderPreset] = {
-    # Free tier (~30 req/min). Default model: qwen3-32b is a strong free option on Groq.
-    # If it is unavailable, try: llama-3.3-70b-versatile or deepseek-r1-distill-llama-70b.
+    # Free tier: about 30 requests per minute, 8000 tokens per minute, 200000 tokens per day for
+    # this model. The benchmark baseline was measured on it: do not change it casually.
     "groq": ProviderPreset(
-        "openai", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", min_interval_s=2.0
+        "openai", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", min_interval_s=2.0
     ),
-    # Free tier (~10 req/min, 4M tokens/day). Space calls 8 s apart to avoid 503s.
+    # Free tier (about 10 requests per minute). Space calls 8 s apart to avoid 503s.
     # Override with AEGIS_MODEL if the default is unavailable or you have a paid key.
-    # Known stable free models (as of 2026): gemini-2.0-flash-lite, gemini-2.0-flash.
+    # Model ids change: gemini-2.0-* is shut down and 2.5-flash is legacy-only (see
+    # ai.google.dev/models). Free-tier access is per model; set AEGIS_MODEL if a 404 or 429 says so.
     "gemini": ProviderPreset(
         "openai",
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        "gemini-2.0-flash-lite",
+        "gemini-3.5-flash-lite",
         min_interval_s=8.0,
     ),
     # Placeholders: untested until you add a key. Set AEGIS_MODEL to a model you have access to.
@@ -56,7 +57,7 @@ PROVIDERS: dict[str, ProviderPreset] = {
         "gpt-4o-mini",
         max_tokens_field="max_completion_tokens",
     ),
-    "anthropic": ProviderPreset("anthropic", "https://api.anthropic.com", "claude-haiku-4-5"),
+    "anthropic": ProviderPreset("anthropic", "https://api.anthropic.com", "claude-sonnet-5-5"),
     # Needs AEGIS_MODEL (see openrouter.ai/models).
     "openrouter": ProviderPreset("openai", "https://openrouter.ai/api/v1", ""),
     # Local models: no key, no cost. Needs Ollama running.
