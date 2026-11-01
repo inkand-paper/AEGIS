@@ -35,16 +35,19 @@ class ProviderPreset:
 
 
 PROVIDERS: dict[str, ProviderPreset] = {
-    # Free tier (about 30 requests per minute), so space calls 2 seconds apart.
+    # Free tier (~30 req/min). Default model: qwen3-32b is a strong free option on Groq.
+    # If it is unavailable, try: llama-3.3-70b-versatile or deepseek-r1-distill-llama-70b.
     "groq": ProviderPreset(
-        "openai", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", min_interval_s=2.0
+        "openai", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", min_interval_s=2.0
     ),
-    # Free tier is limited to roughly 10 requests per minute. Set AEGIS_MIN_INTERVAL_S=0 if paid.
+    # Free tier (~10 req/min, 4M tokens/day). Space calls 8 s apart to avoid 503s.
+    # Override with AEGIS_MODEL if the default is unavailable or you have a paid key.
+    # Known stable free models (as of 2026): gemini-2.0-flash-lite, gemini-2.0-flash.
     "gemini": ProviderPreset(
         "openai",
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        "gemini-3.8-flash",
-        min_interval_s=6.0,
+        "gemini-2.0-flash-lite",
+        min_interval_s=8.0,
     ),
     # Placeholders: untested until you add a key. Set AEGIS_MODEL to a model you have access to.
     "openai": ProviderPreset(
@@ -53,7 +56,7 @@ PROVIDERS: dict[str, ProviderPreset] = {
         "gpt-4o-mini",
         max_tokens_field="max_completion_tokens",
     ),
-    "anthropic": ProviderPreset("anthropic", "https://api.anthropic.com", "claude-sonnet-5-5"),
+    "anthropic": ProviderPreset("anthropic", "https://api.anthropic.com", "claude-haiku-4-5"),
     # Needs AEGIS_MODEL (see openrouter.ai/models).
     "openrouter": ProviderPreset("openai", "https://openrouter.ai/api/v1", ""),
     # Local models: no key, no cost. Needs Ollama running.
@@ -94,6 +97,10 @@ def build_client(
         "input_price_per_mtok": settings.price_input_per_mtok,
         "output_price_per_mtok": settings.price_output_per_mtok,
         "rate_limiter": RateLimiter(interval, sleep=sleep),
+        # For 503 (provider overloaded) use a longer base backoff than the default 0.5 s.
+        # 503 means the server is overwhelmed; hitting it again immediately makes it worse.
+        # 5 s base gives retries at ~5 s, ~11 s, ~22 s — reasonable for free-tier spikes.
+        "base_backoff_s": 5.0,
         "transport": transport,
         "sleep": sleep,
     }
