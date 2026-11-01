@@ -43,7 +43,7 @@ PROVIDERS: dict[str, ProviderPreset] = {
     "gemini": ProviderPreset(
         "openai",
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        "gemini-2.5-flash",
+        "gemini-3.8-flash",
         min_interval_s=6.0,
     ),
     # Placeholders: untested until you add a key. Set AEGIS_MODEL to a model you have access to.
