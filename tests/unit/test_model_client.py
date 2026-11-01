@@ -495,3 +495,51 @@ def test_a_tool_call_in_a_call_that_offered_no_tools_is_a_tool_call_error() -> N
     client, _ = make_client(lambda request: httpx.Response(400, json=body))
     with pytest.raises(ModelToolCallError):
         run(client)
+
+
+def test_gemini_thought_signatures_are_sent_back_unchanged() -> None:
+    """Live Gemini 3: a tool call carries extra_content.google.thought_signature, and the next
+    request is refused (HTTP 400) unless the assistant message returns it as received."""
+    signature = {"google": {"thought_signature": "sig-abc=="}}
+    first = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "fs_read", "arguments": '{"path": "a.txt"}'},
+                            "extra_content": signature,
+                        },
+                        {
+                            "id": "c2",
+                            "type": "function",
+                            "function": {"name": "fs_list", "arguments": "{}"},
+                        },
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json=first if len(sent) == 1 else ok_body())
+
+    client, _ = make_client(handler)
+    reply = run(client)
+    assert reply.tool_calls[0].extra_content == signature
+    assert reply.tool_calls[1].extra_content is None
+    history = [
+        Message(role="user", content="go"),
+        Message(role="assistant", content=None, tool_calls=reply.tool_calls),
+    ]
+    asyncio.run(client.generate(history, [], max_tokens=10, timeout_s=5))
+    calls = sent[1]["messages"][1]["tool_calls"]
+    assert calls[0]["extra_content"] == signature
+    assert "extra_content" not in calls[1]

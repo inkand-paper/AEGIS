@@ -73,6 +73,9 @@ class RawToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     arguments_error: str | None = None  # set when the arguments were not a valid JSON object
+    # Provider data that must come back unchanged with this call. Gemini 3 puts a
+    # `thought_signature` here and answers HTTP 400 if a later request leaves it out.
+    extra_content: dict[str, Any] | None = None
 
 
 class Message(BaseModel):
@@ -194,19 +197,27 @@ def _parse_retry_after(value: str | None) -> float | None:
         return None
 
 
-def _raw_call(call_id: str | None, name: str, arguments: str | dict[str, Any]) -> RawToolCall:
+def _raw_call(
+    call_id: str | None,
+    name: str,
+    arguments: str | dict[str, Any],
+    extra_content: dict[str, Any] | None = None,
+) -> RawToolCall:
     """Build a RawToolCall without ever crashing on bad model output."""
     cid = call_id or f"call_{uuid.uuid4().hex[:12]}"
+    extra = {"extra_content": extra_content}
     if isinstance(arguments, dict):
-        return RawToolCall(id=cid, name=name, arguments=arguments)
+        return RawToolCall(id=cid, name=name, arguments=arguments, **extra)
     try:
         parsed = json.loads(arguments) if arguments.strip() else {}
     except json.JSONDecodeError as exc:
         error = f"arguments are not valid JSON: {exc.msg}"
-        return RawToolCall(id=cid, name=name, arguments_error=error)
+        return RawToolCall(id=cid, name=name, arguments_error=error, **extra)
     if not isinstance(parsed, dict):
-        return RawToolCall(id=cid, name=name, arguments_error="arguments JSON is not an object")
-    return RawToolCall(id=cid, name=name, arguments=parsed)
+        return RawToolCall(
+            id=cid, name=name, arguments_error="arguments JSON is not an object", **extra
+        )
+    return RawToolCall(id=cid, name=name, arguments=parsed, **extra)
 
 
 class HttpModelClient(ABC):
@@ -442,6 +453,7 @@ class _OAIFunction(_Lenient):
 class _OAIToolCall(_Lenient):
     id: str | None = None
     function: _OAIFunction
+    extra_content: dict[str, Any] | None = None  # Gemini 3: the thought signature
 
 
 class _OAIMessage(_Lenient):
@@ -464,6 +476,17 @@ class _OAIResponse(_Lenient):
     usage: _OAIUsage = Field(default_factory=_OAIUsage)
 
 
+def _to_openai_tool_call(call: RawToolCall) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": call.id,
+        "type": "function",
+        "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+    }
+    if call.extra_content is not None:
+        out["extra_content"] = call.extra_content  # returned exactly as received
+    return out
+
+
 def _to_openai_message(message: Message) -> dict[str, Any]:
     if message.role == "tool":
         return {
@@ -474,14 +497,7 @@ def _to_openai_message(message: Message) -> dict[str, Any]:
     out: dict[str, Any] = {"role": message.role}
     if message.role == "assistant" and message.tool_calls:
         out["content"] = message.content
-        out["tool_calls"] = [
-            {
-                "id": call.id,
-                "type": "function",
-                "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
-            }
-            for call in message.tool_calls
-        ]
+        out["tool_calls"] = [_to_openai_tool_call(call) for call in message.tool_calls]
     else:
         out["content"] = message.content or ""
     return out
@@ -529,7 +545,7 @@ class OpenAICompatClient(HttpModelClient):
         response = _OAIResponse.model_validate(data)
         choice = response.choices[0]
         calls = [
-            _raw_call(tc.id, tc.function.name, tc.function.arguments)
+            _raw_call(tc.id, tc.function.name, tc.function.arguments, tc.extra_content)
             for tc in choice.message.tool_calls or []
         ]
         return _Parsed(
