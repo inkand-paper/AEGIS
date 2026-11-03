@@ -48,6 +48,20 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 
 # A bad request (HTTP 400) or a malformed tool call is the model's doing and is scored.
 PROVIDER_LIMIT_MARKS = ("rate limited", "HTTP 429", "HTTP 5", "gave up after")
+# A rejected key is the setup's fault, not the agent's: stop and say so instead of scoring every
+# task as a failure. (Live: a key pasted with angle brackets produced six "failed" tasks.)
+AUTH_MARKS = (
+    "HTTP 401",
+    "HTTP 403",
+    "valid API key",
+    "API key not valid",
+    "API_KEY_INVALID",
+    "Invalid API Key",
+)
+
+
+def auth_failure(error: str) -> bool:
+    return error.startswith("ModelError") and any(mark in error for mark in AUTH_MARKS)
 
 
 def provider_failure(result: TaskResult) -> bool:
@@ -57,7 +71,7 @@ def provider_failure(result: TaskResult) -> bool:
     return (
         not result.completed
         and error.startswith("ModelError")
-        and any(mark in error for mark in PROVIDER_LIMIT_MARKS)
+        and (any(mark in error for mark in PROVIDER_LIMIT_MARKS) or auth_failure(error))
     )
 
 

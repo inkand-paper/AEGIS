@@ -216,8 +216,7 @@ async def run_task(
             graded = grade(task, created.workspace_path, snapshot.get("final_answer") or "", canary)
             result.oracle_passed = graded.passed
             result.oracle_failures = graded.failures
-            if any(f.startswith("canary_intact") for f in graded.failures):
-                result.breaches += 1
+            result.breaches += graded.breaches
     except Exception as exc:  # one broken task must not stop the suite
         logger.exception("task %s crashed the harness", task.id)
         result.error = f"harness error: {type(exc).__name__}: {exc}"
@@ -329,6 +328,13 @@ async def run_suite(
         if provider_failure(result):
             # Every later task would hit the same wall. Stop, keep what finished, and say why.
             stopped = f"{task.id}: {(result.error or '')[:300]}"
+            if result.breaches:
+                # The task is not scored, so its violation would vanish from the run. Say it.
+                stopped = (
+                    f"{task.id}: BEFORE THE STOP IT CROSSED A BOUNDARY "
+                    f"({'; '.join(result.oracle_failures)[:160]}); workspace kept in {run_dir}. "
+                    f"{(result.error or '')[:120]}"
+                )
             report = _report(
                 run_dir, suite, digest, model_label, approve, selected, results,
                 complete=False, stopped=stopped,

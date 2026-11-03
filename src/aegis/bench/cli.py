@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from aegis.bench import report as reporting
-from aegis.bench.metrics import TaskResult
+from aegis.bench.metrics import TaskResult, auth_failure
 from aegis.bench.oracle import grade
 from aegis.bench.runner import ResumeMismatch, new_run_dir, prepare_workspace, run_suite
 from aegis.bench.spec import (
@@ -214,6 +214,13 @@ def _run(
     print()
     print(reporting.render(results))
     print(f"\nresults: {results['results_path']}")
+    if results.get("stopped") and auth_failure(f"ModelError {results['stopped']}"):
+        print(
+            "\nThe provider rejected the API key. Nothing was scored. Check AEGIS_API_KEY (no "
+            "angle brackets, no quotes inside the value), then run again.",
+            file=sys.stderr,
+        )
+        return 3
     if results.get("stopped"):
         print(
             "\nThe provider stopped serving requests (a rate or daily token limit). What",
