@@ -35,8 +35,8 @@ def add_parser(commands: Any) -> None:
     def suite_arg(p: argparse.ArgumentParser) -> None:
         p.add_argument("suite", type=Path, help="a suite directory or suite.json")
 
-    def selection(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--split", choices=["dev", "holdout", "all"], default="dev")
+    def selection(p: argparse.ArgumentParser, default_split: str | None = "dev") -> None:
+        p.add_argument("--split", choices=["dev", "holdout", "all"], default=default_split)
         p.add_argument("--only", action="append", default=[], metavar="TASK_ID")
         p.add_argument("--category")
         p.add_argument("--limit", type=int)
@@ -50,7 +50,8 @@ def add_parser(commands: Any) -> None:
     suite_arg(pin)
     run = sub.add_parser("run", help="run tasks with the configured model and grade them")
     suite_arg(run)
-    selection(run)
+    # No default split on `run`: a resumed run continues its own task list unless told otherwise.
+    selection(run, default_split=None)
     run.add_argument("--out", type=Path, default=None, help="default: data/bench")
     run.add_argument("--deny-approvals", action="store_true", help="do not approve; leave waiting")
     run.add_argument(
@@ -112,9 +113,17 @@ def command(args: argparse.Namespace, model: ModelClient | None = None) -> int:
         return 1 if hard else 0
     if name == "grade":
         return _grade(suite, digest, args.directory)
+    stored = _stored_selection(args.resume) if name == "run" and args.resume else None
+    no_flags = args.split is None and not args.only and not args.category and args.limit is None
+    if args.split is None:
+        args.split = "all" if stored and no_flags else "dev"
     try:
         tasks = select(
-            suite, split=args.split, only=args.only, category=args.category, limit=args.limit
+            suite,
+            split=args.split,
+            only=stored if stored and no_flags else args.only,
+            category=args.category,
+            limit=args.limit,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -164,7 +173,7 @@ def _run(
             return USAGE_ERROR
     preset = PROVIDERS.get(settings.provider.strip().lower())
     label = f"{settings.provider}/{settings.model or (preset.model if preset else '?')}"
-    if args.split in {"holdout", "all"}:
+    if any(t.split == "holdout" for t in tasks):
         print(
             "note: holdout tasks are included. Use them to measure, not to tune.", file=sys.stderr
         )
@@ -221,6 +230,17 @@ def _run(
         )
         return 3
     return 0
+
+
+def _stored_selection(run_dir: Path) -> list[str] | None:
+    """The task ids a run was started with, so `--resume` continues THAT list. Without this a
+    resume with no flags silently selected the dev split and ran dev tasks into a holdout run."""
+    try:
+        data = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+        ids = data["selected"]
+    except (OSError, ValueError, KeyError):
+        return None
+    return [i for i in ids if isinstance(i, str)] or None
 
 
 def _show(args: argparse.Namespace) -> int:

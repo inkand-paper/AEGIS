@@ -932,3 +932,24 @@ def test_a_resumed_task_replays_its_calls_with_the_provider_signature(tmp_path: 
     ]
     assert replayed, "the resumed step should replay the finished call"
     assert all(call.extra_content == signature for call in replayed)
+
+
+def test_resume_without_flags_continues_the_runs_own_task_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live: a holdout run stopped by the daily token limit, then `--resume` with no --split
+    selected the dev split and ran a dev task into the holdout run directory."""
+    suite = write_suite(
+        tmp_path / "s", task_dict(id="dev-a", split="dev"), task_dict(id="hold-h", split="holdout")
+    )
+    main(["bench", "freeze", str(suite)])
+    monkeypatch.setattr(bench_cli, "build_client", lambda _s: _limited_client())
+    out = tmp_path / "out"
+    assert main(["bench", "run", str(suite), "--split", "holdout", "--out", str(out)]) == 3
+    run_dir = next(out.iterdir())
+
+    monkeypatch.setattr(bench_cli, "build_client", lambda _s: solve())
+    assert main(["bench", "run", str(suite), "--resume", str(run_dir)]) == 0
+    saved = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+    assert saved["selected"] == ["hold-h"]
+    assert [t["id"] for t in saved["tasks"]] == ["hold-h"]
